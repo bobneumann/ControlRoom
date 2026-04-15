@@ -9,8 +9,9 @@ In edit mode:
   - Click a gauge to select it (amber border); its properties load in the sidebar.
   - Drag a gauge to a new grid cell (target cell highlights in green).
   - Edit source, label, unit, min/max/danger in the sidebar; click Apply.
-  - Add gauge  — places a new CPU-total gauge in the first empty cell.
-  - Delete gauge — removes the selected gauge.
+  - Add Gauge   — places a new CPU-total gauge in the first empty cell.
+  - Add Divider — inserts a labeled header bar above the selected row.
+  - Delete      — removes the selected gauge or divider.
   - Save / Load — layout.json in the same folder as this file.
   - Press E or Escape (or "LIVE MODE" button) to return to live mode.
     Layout is auto-saved on exit from edit mode.
@@ -31,7 +32,7 @@ from PySide6.QtWidgets import (
     QPushButton, QFrame,
     QDialog, QListWidget, QListWidgetItem, QMessageBox,
 )
-from PySide6.QtCore import Qt, QTimer, QRect, QRectF, QPointF, Signal
+from PySide6.QtCore import Qt, QTimer, QRect, Signal
 from PySide6.QtGui import QPainter, QColor, QPen, QFont, QShortcut, QKeySequence
 
 import host_registry
@@ -76,23 +77,29 @@ QFrame            {{ color: {btn_bg}; }}
 
 THEME_REGISTRY: dict = {
     "wwii": {
-        "name":       "WWII Cockpit",
-        "factory":    theme_wwii_cockpit,
-        "bg":         "#3C4323",
-        "toolbar_bg": "#2a2e1a",
-        "toolbar_fg": "#c8bfa8",
-        "sidebar":    _sidebar_style(),   # olive-dark defaults
+        "name":         "WWII Cockpit",
+        "factory":      theme_wwii_cockpit,
+        "bg":           "#3C4323",
+        "toolbar_bg":   "#2a2e1a",
+        "toolbar_fg":   "#c8bfa8",
+        "div_bg":       "#4a5230",
+        "div_stripe":   "#a09870",
+        "div_text":     "#c8bfa8",
+        "sidebar":      _sidebar_style(),
     },
     "f1": {
-        "name":       "F1 Racing",
-        "factory":    theme_f1_racing,
-        "bg":         "#0E0E10",
-        "toolbar_bg": "#131316",
-        "toolbar_fg": "#d0d0d8",
-        "sidebar":    _sidebar_style(bg="#0f0f14", input_bg="#1a1a22",
-                                     border="#2e2e40", fg="#d0d0d8",
-                                     dim="#707080", btn_bg="#1a1a28",
-                                     btn_border="#2e2e44"),
+        "name":         "F1 Racing",
+        "factory":      theme_f1_racing,
+        "bg":           "#0E0E10",
+        "toolbar_bg":   "#131316",
+        "toolbar_fg":   "#d0d0d8",
+        "div_bg":       "#16161c",
+        "div_stripe":   "#ff5f10",
+        "div_text":     "#d0d0d8",
+        "sidebar":      _sidebar_style(bg="#0f0f14", input_bg="#1a1a22",
+                                       border="#2e2e40", fg="#d0d0d8",
+                                       dim="#707080", btn_bg="#1a1a28",
+                                       btn_border="#2e2e44"),
     },
 }
 
@@ -131,15 +138,16 @@ SOURCE_REGISTRY: dict = {
 @dataclass
 class LayoutSlot:
     source_key:  str
-    label:       str   = ""          # empty = use registry default
-    unit:        str   = ""          # empty = use registry default
+    label:       str   = ""           # empty = use registry default
+    unit:        str   = ""           # empty = use registry default
     min_val:     float = 0.0
     max_val:     float = 100.0
-    danger_from: Optional[float] = 80.0   # None = no danger arc
+    danger_from: Optional[float] = 80.0    # None = no danger arc
     row:         int   = 0
     col:         int   = 0
     row_span:    int   = 1
     col_span:    int   = 1
+    slot_type:   str   = "gauge"      # "gauge" | "divider"
 
 
 @dataclass
@@ -162,13 +170,80 @@ class LayoutModel:
     def load(cls, path: str) -> "LayoutModel":
         with open(path) as f:
             d = json.load(f)
-        slots = [LayoutSlot(**s) for s in d["slots"]]
+        slots = [LayoutSlot(**{k: v for k, v in s.items()
+                               if k in LayoutSlot.__dataclass_fields__})
+                 for s in d["slots"]]
         return cls(
             grid_cols = d["grid_cols"],
             grid_rows = d["grid_rows"],
             theme_key = d.get("theme_key", "wwii"),
             slots     = slots,
         )
+
+
+# ============================================================
+#  DividerWidget — full-width labeled group header bar
+# ============================================================
+
+_DIVIDER_H = 30   # pixel height of a divider row
+
+
+class DividerWidget(QWidget):
+    """
+    Renders a themed horizontal bar that visually groups gauges below it.
+    source_key stores the host key prefix for the live status dot (optional).
+    label stores the display text.
+    """
+
+    def __init__(self, slot: LayoutSlot, theme_key: str = "wwii", parent=None):
+        super().__init__(parent)
+        self._label     = slot.label or "GROUP"
+        self._host_key  = slot.source_key   # e.g. "wsl_ubuntu"; empty = no dot
+        self._theme_key = theme_key
+        self.setAttribute(Qt.WA_OpaquePaintEvent)
+
+    def set_theme_key(self, key: str):
+        self._theme_key = key
+        self.update()
+
+    def paintEvent(self, event):
+        try:
+            ti   = THEME_REGISTRY.get(self._theme_key, THEME_REGISTRY["wwii"])
+            p    = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            w, h = self.width(), self.height()
+
+            # Background
+            p.fillRect(0, 0, w, h, QColor(ti["div_bg"]))
+
+            # Left accent stripe (4 px, vertically centered with 4px margin)
+            p.fillRect(0, 3, 4, h - 6, QColor(ti["div_stripe"]))
+
+            # Label
+            font = QFont("Arial Narrow", 9, QFont.Bold)
+            font.setLetterSpacing(QFont.AbsoluteSpacing, 1.5)
+            p.setFont(font)
+            p.setPen(QColor(ti["div_text"]))
+            p.drawText(QRect(12, 0, w - 32, h),
+                       Qt.AlignVCenter | Qt.AlignLeft,
+                       self._label.upper())
+
+            # Status dot (if host_key is set)
+            if self._host_key:
+                status = host_registry.get_host_status(self._host_key)
+                dot_color = {
+                    "connected":    QColor(80,  200,  80),
+                    "connecting":   QColor(200, 160,  40),
+                    "error":        QColor(200,  60,  60),
+                }.get(status, QColor(80, 80, 80))
+                cx, cy = w - 14, h // 2
+                p.setPen(Qt.NoPen)
+                p.setBrush(dot_color)
+                p.drawEllipse(cx - 5, cy - 5, 10, 10)
+
+            p.end()
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -185,38 +260,38 @@ class _EditOverlay(QWidget):
         super().__init__(canvas)
         self._canvas = canvas
         self.setMouseTracking(True)
-        # Semi-transparent so gauges show through
         self.setAttribute(Qt.WA_TranslucentBackground)
 
     def paintEvent(self, event):
-        c   = self._canvas
-        m   = c._model
-        p   = QPainter(self)
+        c       = self._canvas
+        m       = c._model
+        p       = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        w, h = self.width(), self.height()
+        w, h    = self.width(), self.height()
+        heights = c._row_heights()
 
         # ── grid lines ──────────────────────────────────────────────────
         p.setPen(QPen(QColor(120, 130, 80, 90), 1))
         cell_w = w / m.grid_cols
-        cell_h = h / m.grid_rows
         for col in range(m.grid_cols + 1):
             x = int(col * cell_w)
             p.drawLine(x, 0, x, h)
-        for row in range(m.grid_rows + 1):
-            y = int(row * cell_h)
-            p.drawLine(0, y, w, y)
+        y_acc = 0
+        for rh in heights:
+            p.drawLine(0, int(y_acc), w, int(y_acc))
+            y_acc += rh
+        p.drawLine(0, int(y_acc), w, int(y_acc))
 
         # ── drag target highlight ────────────────────────────────────────
         if c._drag_cell is not None:
             row, col = c._drag_cell
-            r = c._cell_rect(row, col, 1, 1)
-            # Check if target cell is occupied (swap) or empty (move)
+            r = c._cell_rect_for(row, col, 1, 1)
             occupied = any(
                 i != c._drag_idx and s.row == row and s.col == col
                 for i, s in enumerate(c._model.slots)
             )
-            fill  = QColor(210, 160, 60, 55)  if occupied else QColor(140, 180, 90, 55)
-            border= QColor(210, 160, 60, 200) if occupied else QColor(140, 180, 90, 200)
+            fill   = QColor(210, 160, 60,  55) if occupied else QColor(140, 180, 90,  55)
+            border = QColor(210, 160, 60, 200) if occupied else QColor(140, 180, 90, 200)
             p.fillRect(r, fill)
             p.setPen(QPen(border, 2))
             p.setBrush(Qt.NoBrush)
@@ -225,7 +300,7 @@ class _EditOverlay(QWidget):
         # ── selection border ────────────────────────────────────────────
         if c._selected >= 0 and c._selected < len(m.slots):
             s = m.slots[c._selected]
-            r = c._cell_rect(s.row, s.col, s.row_span, s.col_span)
+            r = c._widget_rect(s)
             p.setPen(QPen(QColor(210, 175, 80, 230), 2))
             p.setBrush(Qt.NoBrush)
             p.drawRect(r.adjusted(2, 2, -2, -2))
@@ -238,14 +313,15 @@ class _EditOverlay(QWidget):
         p.end()
 
     def mousePressEvent(self, event):
-        c = self._canvas
+        c   = self._canvas
         pos = event.position()
         x, y = int(pos.x()), int(pos.y())
         idx = c._hit_slot(x, y)
         c.select_slot(idx)
-        if idx >= 0:
-            c._drag_idx   = idx
-            c._drag_cell  = None
+        # Only start drag for gauges, not dividers
+        if idx >= 0 and c._model.slots[idx].slot_type == "gauge":
+            c._drag_idx  = idx
+            c._drag_cell = None
 
     def mouseMoveEvent(self, event):
         c = self._canvas
@@ -254,8 +330,12 @@ class _EditOverlay(QWidget):
         pos = event.position()
         row, col = c._pos_to_cell(int(pos.x()), int(pos.y()))
         slot = c._model.slots[c._drag_idx]
-        # Only update if different from current position
-        if (row, col) != (slot.row, slot.col):
+        # Skip cells occupied by dividers
+        target_slot = next(
+            (s for s in c._model.slots if s.row == row and s.col == col
+             and s.slot_type == "divider"), None
+        )
+        if (row, col) != (slot.row, slot.col) and target_slot is None:
             c._drag_cell = (row, col)
         else:
             c._drag_cell = None
@@ -280,19 +360,20 @@ _SPACING = 8   # pixels between gauges
 
 class LayoutCanvas(QWidget):
     """
-    Owns Gauge children, positions them manually, drives poll + animation.
-    In edit mode, raises an overlay that handles drag interaction.
+    Owns Gauge and DividerWidget children, positions them manually, drives
+    poll + animation.  In edit mode, raises an overlay for drag interaction.
     """
 
     slot_selected = Signal(int)   # emits slot index (-1 = none selected)
 
-    def __init__(self, model: LayoutModel, theme=None,
+    def __init__(self, model: LayoutModel, theme=None, theme_key: str = "wwii",
                  poll_ms: int = 1000, fps: int = 60, parent=None):
         super().__init__(parent)
-        self._model   = model
-        self._theme   = theme or theme_wwii_cockpit()
-        self._gauges: list[Gauge]    = []
-        self._sources: list[Callable] = []
+        self._model     = model
+        self._theme     = theme or theme_wwii_cockpit()
+        self._theme_key = theme_key
+        self._widgets: list[QWidget]   = []
+        self._sources:  list[Optional[Callable]] = []
         self._selected  = -1
         self._drag_idx  = -1
         self._drag_cell = None
@@ -315,6 +396,27 @@ class LayoutCanvas(QWidget):
 
         self._poll()   # initial read before first timer fire
 
+    # ── row height helpers ───────────────────────────────────────────── #
+
+    def _row_heights(self) -> list:
+        """
+        Returns pixel heights for each row.
+        Divider rows get _DIVIDER_H px; gauge rows share the remainder equally.
+        """
+        m = self._model
+        divider_rows = {s.row for s in m.slots if s.slot_type == "divider"}
+        n_div   = len(divider_rows)
+        n_gauge = m.grid_rows - n_div
+        total   = max(1, self.height())
+        gauge_h = max(40.0, (total - n_div * _DIVIDER_H) / max(1, n_gauge))
+        return [
+            float(_DIVIDER_H) if r in divider_rows else gauge_h
+            for r in range(m.grid_rows)
+        ]
+
+    def _row_y(self, row: int) -> int:
+        return int(sum(self._row_heights()[:row]))
+
     # ── internal helpers ─────────────────────────────────────────────── #
 
     def _make_config(self, slot: LayoutSlot) -> GaugeConfig:
@@ -327,52 +429,68 @@ class LayoutCanvas(QWidget):
             danger_from = slot.danger_from,
         )
 
-    def _make_source(self, slot: LayoutSlot) -> Callable:
+    def _make_source(self, slot: LayoutSlot) -> Optional[Callable]:
+        if slot.slot_type == "divider":
+            return None
         info = SOURCE_REGISTRY.get(slot.source_key)
         if info:
             return info["factory"]()
         return lambda: 0.0
 
-    def _cell_rect(self, row: int, col: int,
-                   row_span: int = 1, col_span: int = 1) -> QRect:
-        w, h  = self.width(), self.height()
-        cw    = w / self._model.grid_cols
-        ch    = h / self._model.grid_rows
-        s     = _SPACING
-        x     = int(col * cw) + s
-        y     = int(row * ch) + s
-        rw    = int(col_span * cw) - 2 * s
-        rh    = int(row_span * ch) - 2 * s
+    def _cell_rect_for(self, row: int, col: int,
+                       row_span: int = 1, col_span: int = 1,
+                       is_divider: bool = False) -> QRect:
+        w      = self.width()
+        m      = self._model
+        cw     = w / m.grid_cols
+        heights = self._row_heights()
+        sv     = 2 if is_divider else _SPACING
+        x      = int(col * cw) + _SPACING
+        y      = int(sum(heights[:row])) + sv
+        rw     = int(col_span * cw) - 2 * _SPACING
+        rh     = int(sum(heights[row:row + row_span])) - 2 * sv
         return QRect(x, y, max(rw, 1), max(rh, 1))
 
+    def _widget_rect(self, slot: LayoutSlot) -> QRect:
+        """Return the QRect for a slot (handles gauge vs divider spacing)."""
+        is_div = slot.slot_type == "divider"
+        cs     = self._model.grid_cols if is_div else slot.col_span
+        return self._cell_rect_for(slot.row, slot.col,
+                                   slot.row_span, cs, is_divider=is_div)
+
     def _reposition(self):
-        for slot, gauge in zip(self._model.slots, self._gauges):
-            gauge.setGeometry(
-                self._cell_rect(slot.row, slot.col, slot.row_span, slot.col_span)
-            )
+        for slot, widget in zip(self._model.slots, self._widgets):
+            widget.setGeometry(self._widget_rect(slot))
 
     def _rebuild(self):
-        for g in self._gauges:
-            g.deleteLater()
-        self._gauges.clear()
+        for w in self._widgets:
+            w.deleteLater()
+        self._widgets.clear()
         self._sources.clear()
         for slot in self._model.slots:
-            g = Gauge(config=self._make_config(slot), theme=self._theme, parent=self)
-            g.show()
-            self._gauges.append(g)
+            w = self._make_widget(slot)
+            w.show()
+            self._widgets.append(w)
             self._sources.append(self._make_source(slot))
         self._reposition()
 
+    def _make_widget(self, slot: LayoutSlot) -> QWidget:
+        if slot.slot_type == "divider":
+            return DividerWidget(slot, theme_key=self._theme_key, parent=self)
+        return Gauge(config=self._make_config(slot), theme=self._theme, parent=self)
+
     def _poll(self):
-        for src, gauge in zip(self._sources, self._gauges):
+        for src, widget in zip(self._sources, self._widgets):
+            if src is None:
+                continue
             try:
-                gauge.value = src()
+                widget.value = src()
             except Exception:
                 pass
 
     def _repaint_all(self):
-        for g in self._gauges:
-            g.update()
+        for w in self._widgets:
+            w.update()
 
     # ── resize ───────────────────────────────────────────────────────── #
 
@@ -384,19 +502,26 @@ class LayoutCanvas(QWidget):
     # ── hit-testing & coordinate helpers ─────────────────────────────── #
 
     def _hit_slot(self, x: int, y: int) -> int:
-        """Return index of gauge whose geometry contains (x, y), or -1."""
-        for i, gauge in enumerate(self._gauges):
-            if gauge.geometry().contains(x, y):
+        """Return index of widget whose geometry contains (x, y), or -1."""
+        for i, widget in enumerate(self._widgets):
+            if widget.geometry().contains(x, y):
                 return i
         return -1
 
     def _pos_to_cell(self, x: int, y: int) -> tuple:
         """Convert pixel position to (row, col), clamped to grid."""
-        m   = self._model
-        cw  = self.width()  / m.grid_cols
-        ch  = self.height() / m.grid_rows
-        col = max(0, min(m.grid_cols - 1, int(x / cw)))
-        row = max(0, min(m.grid_rows - 1, int(y / ch)))
+        m       = self._model
+        cw      = self.width() / m.grid_cols
+        heights = self._row_heights()
+        col     = max(0, min(m.grid_cols - 1, int(x / cw)))
+        # Find row by cumulative y
+        y_acc = 0.0
+        row   = m.grid_rows - 1
+        for r, h in enumerate(heights):
+            if y < y_acc + h:
+                row = r
+                break
+            y_acc += h
         return row, col
 
     # ── public API (called from overlay / sidebar) ────────────────────── #
@@ -409,62 +534,136 @@ class LayoutCanvas(QWidget):
     def move_slot(self, idx: int, new_row: int, new_col: int):
         old_row = self._model.slots[idx].row
         old_col = self._model.slots[idx].col
-        # Find any gauge already occupying the target cell
         swap_idx = next(
             (i for i, s in enumerate(self._model.slots)
-             if i != idx and s.row == new_row and s.col == new_col),
+             if i != idx and s.row == new_row and s.col == new_col
+             and s.slot_type == "gauge"),
             None
         )
         self._model.slots[idx].row = new_row
         self._model.slots[idx].col = new_col
         if swap_idx is not None:
-            # Swap: displaced gauge goes to the vacated cell
             self._model.slots[swap_idx].row = old_row
             self._model.slots[swap_idx].col = old_col
         self._reposition()
         self._overlay.update()
 
     def update_slot(self, idx: int, slot: LayoutSlot):
-        """Replace slot data and refresh gauge + source."""
-        old_key = self._model.slots[idx].source_key
+        """Replace slot data and refresh widget + source."""
+        old_key  = self._model.slots[idx].source_key
+        old_type = self._model.slots[idx].slot_type
         self._model.slots[idx] = slot
-        g = self._gauges[idx]
-        g.config = self._make_config(slot)
-        # Only reset needle when the data source changes — not for visual edits
-        if slot.source_key != old_key:
-            g._value = g.config.min_val
-            g._display_value = g.config.min_val
+
+        if slot.slot_type == "divider":
+            # Replace widget if type changed, otherwise just update label/host
+            if old_type != "divider":
+                self._widgets[idx].deleteLater()
+                w = DividerWidget(slot, theme_key=self._theme_key, parent=self)
+                w.show()
+                self._widgets[idx] = w
+                self._sources[idx] = None
+            else:
+                dw = self._widgets[idx]
+                dw._label    = slot.label or "GROUP"
+                dw._host_key = slot.source_key
+                dw._theme_key = self._theme_key
+            self._reposition()
+            if self._overlay.isVisible():
+                self._overlay.raise_()
+            return
+
+        # Gauge path
+        if old_type == "divider":
+            # Was a divider, now a gauge — replace widget
+            self._widgets[idx].deleteLater()
+            g = Gauge(config=self._make_config(slot), theme=self._theme, parent=self)
+            g.show()
+            self._widgets[idx] = g
             self._sources[idx] = self._make_source(slot)
-        g.update()
+        else:
+            g = self._widgets[idx]
+            g.config = self._make_config(slot)
+            if slot.source_key != old_key:
+                g._value         = g.config.min_val
+                g._display_value = g.config.min_val
+                self._sources[idx] = self._make_source(slot)
+        self._widgets[idx].update()
+        self._reposition()
+        if self._overlay.isVisible():
+            self._overlay.raise_()
 
     def add_slot(self, slot: LayoutSlot):
         self._model.slots.append(slot)
-        g = Gauge(config=self._make_config(slot), theme=self._theme, parent=self)
-        g.show()
-        self._gauges.append(g)
+        w = self._make_widget(slot)
+        w.show()
+        self._widgets.append(w)
         self._sources.append(self._make_source(slot))
         self._reposition()
         if self._overlay.isVisible():
-            self._overlay.raise_()   # new child lands on top; push overlay back up
+            self._overlay.raise_()
+        self.select_slot(len(self._model.slots) - 1)
+
+    def add_divider(self, before_row: int, label: str, host_key: str = ""):
+        """
+        Insert a new divider row before `before_row`.
+        Shifts all slots at row >= before_row down by 1, increments grid_rows.
+        """
+        for s in self._model.slots:
+            if s.row >= before_row:
+                s.row += 1
+        self._model.grid_rows += 1
+
+        div_slot = LayoutSlot(
+            source_key = host_key,
+            label      = label,
+            row        = before_row,
+            col        = 0,
+            col_span   = self._model.grid_cols,
+            slot_type  = "divider",
+        )
+        self._model.slots.append(div_slot)
+        w = DividerWidget(div_slot, theme_key=self._theme_key, parent=self)
+        w.show()
+        self._widgets.append(w)
+        self._sources.append(None)
+        self._reposition()
+        if self._overlay.isVisible():
+            self._overlay.raise_()
         self.select_slot(len(self._model.slots) - 1)
 
     def remove_slot(self, idx: int):
-        self._gauges[idx].deleteLater()
-        del self._gauges[idx]
+        slot = self._model.slots[idx]
+        removed_row = slot.row
+
+        self._widgets[idx].deleteLater()
+        del self._widgets[idx]
         del self._sources[idx]
         del self._model.slots[idx]
+
+        # If we removed a divider, collapse that row
+        if slot.slot_type == "divider":
+            self._model.grid_rows = max(1, self._model.grid_rows - 1)
+            for s in self._model.slots:
+                if s.row > removed_row:
+                    s.row -= 1
+
         self._selected = -1
+        self._reposition()
         self._overlay.update()
         self.slot_selected.emit(-1)
 
     def set_grid_size(self, cols: int, rows: int):
         self._model.grid_cols = cols
         self._model.grid_rows = rows
+        # Update divider col_spans to match new width
+        for s in self._model.slots:
+            if s.slot_type == "divider":
+                s.col_span = cols
         self._reposition()
         self._overlay.update()
 
     def load_model(self, model: LayoutModel):
-        self._model = model
+        self._model    = model
         self._selected = -1
         self._drag_idx = -1
         self._drag_cell = None
@@ -474,13 +673,14 @@ class LayoutCanvas(QWidget):
 
     def set_theme(self, theme: GaugeTheme, key: str):
         """Replace theme on all gauges and update model's theme_key."""
-        self._theme = theme
+        self._theme     = theme
+        self._theme_key = key
         self._model.theme_key = key
-        for i, (slot, old_g) in enumerate(zip(self._model.slots, self._gauges)):
-            old_g.deleteLater()
-            new_g = Gauge(config=self._make_config(slot), theme=theme, parent=self)
-            new_g.show()
-            self._gauges[i] = new_g
+        for i, (slot, old_w) in enumerate(zip(self._model.slots, self._widgets)):
+            old_w.deleteLater()
+            new_w = self._make_widget(slot)
+            new_w.show()
+            self._widgets[i] = new_w
         self._reposition()
 
     def set_edit_mode(self, enabled: bool):
@@ -543,13 +743,11 @@ class _GaugePickerDialog(QDialog):
             it.setData(Qt.UserRole, key)
             self._list.addItem(it)
 
-        # Local sources first
         _header("── Local ──────────────────────")
         for key, info in SOURCE_REGISTRY.items():
             if info.get("group") is None:
                 _entry(key, info)
 
-        # Remote sources grouped by host
         groups: dict = {}
         for key, info in SOURCE_REGISTRY.items():
             g = info.get("group")
@@ -571,7 +769,6 @@ class _GaugePickerDialog(QDialog):
 # ============================================================
 #  EditSidebar
 # ============================================================
-
 
 def _sep() -> QFrame:
     line = QFrame()
@@ -616,23 +813,27 @@ class EditSidebar(QWidget):
         vbox.addWidget(_sep())
 
         # ── Gauge properties ──────────────────────────────────────────
-        vbox.addWidget(QLabel("SOURCE"))
+        self._gauge_section = QWidget()
+        gs = QVBoxLayout(self._gauge_section)
+        gs.setContentsMargins(0, 0, 0, 0)
+        gs.setSpacing(6)
+
+        gs.addWidget(QLabel("SOURCE"))
         self._src = QComboBox()
         for key, info in SOURCE_REGISTRY.items():
             self._src.addItem(info["label"], key)
-        vbox.addWidget(self._src)
+        gs.addWidget(self._src)
 
-        vbox.addWidget(QLabel("LABEL  (blank = source default)"))
+        gs.addWidget(QLabel("LABEL  (blank = source default)"))
         self._label = QLineEdit()
         self._label.setPlaceholderText("leave blank for default")
-        vbox.addWidget(self._label)
+        gs.addWidget(self._label)
 
-        vbox.addWidget(QLabel("UNIT  (blank = source default)"))
+        gs.addWidget(QLabel("UNIT  (blank = source default)"))
         self._unit = QLineEdit()
         self._unit.setPlaceholderText("leave blank for default")
-        vbox.addWidget(self._unit)
+        gs.addWidget(self._unit)
 
-        # Min / Max row
         minmax = QWidget()
         mm_l = QHBoxLayout(minmax)
         mm_l.setContentsMargins(0, 0, 0, 0); mm_l.setSpacing(6)
@@ -645,9 +846,8 @@ class EditSidebar(QWidget):
         self._max.setRange(-99999, 99999)
         self._max.setValue(100)
         mm_l.addWidget(self._max)
-        vbox.addWidget(minmax)
+        gs.addWidget(minmax)
 
-        # Danger row
         danger = QWidget()
         dng_l = QHBoxLayout(danger)
         dng_l.setContentsMargins(0, 0, 0, 0); dng_l.setSpacing(6)
@@ -658,16 +858,39 @@ class EditSidebar(QWidget):
         self._danger_val.setValue(80)
         dng_l.addWidget(self._danger_chk)
         dng_l.addWidget(self._danger_val)
-        vbox.addWidget(danger)
+        gs.addWidget(danger)
         self._danger_chk.toggled.connect(self._danger_val.setEnabled)
 
-        # Apply
         self._apply_btn = QPushButton("Apply")
         self._apply_btn.clicked.connect(self._apply)
-        vbox.addWidget(self._apply_btn)
+        gs.addWidget(self._apply_btn)
 
-        # Delete
-        self._del_btn = QPushButton("Delete Gauge")
+        vbox.addWidget(self._gauge_section)
+
+        # ── Divider properties ────────────────────────────────────────
+        self._div_section = QWidget()
+        ds = QVBoxLayout(self._div_section)
+        ds.setContentsMargins(0, 0, 0, 0)
+        ds.setSpacing(6)
+
+        ds.addWidget(QLabel("DIVIDER LABEL"))
+        self._div_label = QLineEdit()
+        self._div_label.setPlaceholderText("e.g.  EPIC PROD")
+        ds.addWidget(self._div_label)
+
+        ds.addWidget(QLabel("HOST KEY  (for status dot, or blank)"))
+        self._div_host = QComboBox()
+        self._div_host.addItem("— none —", "")
+        ds.addWidget(self._div_host)
+
+        self._div_apply_btn = QPushButton("Apply")
+        self._div_apply_btn.clicked.connect(self._apply_divider)
+        ds.addWidget(self._div_apply_btn)
+
+        vbox.addWidget(self._div_section)
+
+        # ── Delete (shared) ───────────────────────────────────────────
+        self._del_btn = QPushButton("Delete")
         self._del_btn.clicked.connect(self._delete)
         self._del_btn.setStyleSheet(
             "QPushButton { color: #c06050; }"
@@ -677,10 +900,14 @@ class EditSidebar(QWidget):
 
         vbox.addWidget(_sep())
 
-        # ── Add gauge ─────────────────────────────────────────────────
+        # ── Add gauge / divider ───────────────────────────────────────
         add_btn = QPushButton("Add Gauge")
-        add_btn.clicked.connect(self._add)
+        add_btn.clicked.connect(self._add_gauge)
         vbox.addWidget(add_btn)
+
+        add_div_btn = QPushButton("Add Divider")
+        add_div_btn.clicked.connect(self._add_divider)
+        vbox.addWidget(add_div_btn)
 
         vbox.addWidget(_sep())
 
@@ -716,7 +943,6 @@ class EditSidebar(QWidget):
 
         vbox.addStretch()
 
-        # Done
         done_btn = QPushButton("▶   LIVE MODE")
         done_btn.setStyleSheet(
             "QPushButton { background: #1e2e14; color: #90c060;"
@@ -726,22 +952,30 @@ class EditSidebar(QWidget):
         done_btn.clicked.connect(self._exit_edit)
         vbox.addWidget(done_btn)
 
-        self._set_enabled(False)
+        self._set_selection_mode("none")
 
-    def _set_enabled(self, v: bool):
-        for w in (self._src, self._label, self._unit,
-                  self._min, self._max,
-                  self._danger_chk, self._danger_val,
-                  self._apply_btn, self._del_btn):
-            w.setEnabled(v)
+    def _set_selection_mode(self, mode: str):
+        """mode: "none" | "gauge" | "divider" """
+        self._gauge_section.setVisible(mode == "gauge")
+        self._div_section.setVisible(mode == "divider")
+        self._del_btn.setEnabled(mode in ("gauge", "divider"))
+
+    def _refresh_div_host_combo(self):
+        """Rebuild the host-key combo from currently active remote hosts."""
+        self._div_host.clear()
+        self._div_host.addItem("— none —", "")
+        for key, info in SOURCE_REGISTRY.items():
+            group = info.get("group")
+            if group and key.endswith(":cpu"):
+                # Extract host prefix from key like "wsl_ubuntu:cpu"
+                host_prefix = key[:-4]   # strip ":cpu"
+                self._div_host.addItem(group, host_prefix)
 
     # ── slot selection ─────────────────────────────────────────────── #
 
     def sync_theme_combo(self, key: str):
-        """Called by DesignerWindow on load to sync combo to current theme."""
         ci = self._theme_combo.findData(key)
         if ci >= 0:
-            # Block signal so we don't re-trigger _change_theme during load
             self._theme_combo.blockSignals(True)
             self._theme_combo.setCurrentIndex(ci)
             self._theme_combo.blockSignals(False)
@@ -758,11 +992,23 @@ class EditSidebar(QWidget):
         self._idx = idx
         if idx < 0:
             self._title.setText("EDIT MODE")
-            self._set_enabled(False)
+            self._set_selection_mode("none")
             return
-        self._set_enabled(True)
+
         slot = self._canvas._model.slots[idx]
+
+        if slot.slot_type == "divider":
+            self._title.setText(f"DIVIDER {idx + 1}")
+            self._set_selection_mode("divider")
+            self._refresh_div_host_combo()
+            self._div_label.setText(slot.label)
+            ci = self._div_host.findData(slot.source_key)
+            if ci >= 0:
+                self._div_host.setCurrentIndex(ci)
+            return
+
         self._title.setText(f"GAUGE {idx + 1}")
+        self._set_selection_mode("gauge")
 
         ci = self._src.findData(slot.source_key)
         if ci >= 0:
@@ -794,6 +1040,21 @@ class EditSidebar(QWidget):
             col         = old.col,
             row_span    = old.row_span,
             col_span    = old.col_span,
+            slot_type   = "gauge",
+        )
+        self._canvas.update_slot(self._idx, new)
+
+    def _apply_divider(self):
+        if self._idx < 0:
+            return
+        old = self._canvas._model.slots[self._idx]
+        new = LayoutSlot(
+            source_key = self._div_host.currentData() or "",
+            label      = self._div_label.text().strip(),
+            row        = old.row,
+            col        = 0,
+            col_span   = self._canvas._model.grid_cols,
+            slot_type  = "divider",
         )
         self._canvas.update_slot(self._idx, new)
 
@@ -803,17 +1064,20 @@ class EditSidebar(QWidget):
         self._canvas.remove_slot(self._idx)
         self._idx = -1
 
-    def _add(self):
+    def _add_gauge(self):
         dlg = _GaugePickerDialog(self)
         if dlg.exec() != QDialog.Accepted or dlg.chosen_key is None:
             return
 
         m        = self._canvas._model
-        occupied = {(s.row, s.col) for s in m.slots}
+        # Gauge cells only (not divider rows)
+        gauge_rows = {s.row for s in m.slots if s.slot_type == "divider"}
+        occupied   = {(s.row, s.col) for s in m.slots if s.slot_type == "gauge"}
 
-        # Find first empty cell
         target = None
         for row in range(m.grid_rows):
+            if row in gauge_rows:
+                continue
             for col in range(m.grid_cols):
                 if (row, col) not in occupied:
                     target = (row, col)
@@ -822,10 +1086,9 @@ class EditSidebar(QWidget):
                 break
 
         if target is None:
-            # Grid is full — offer to add a row
             ans = QMessageBox.question(
                 self, "Grid Full",
-                "All cells are occupied.  Add a row to make room?",
+                "All gauge cells are occupied.  Add a row to make room?",
                 QMessageBox.Yes | QMessageBox.Cancel,
             )
             if ans != QMessageBox.Yes:
@@ -835,17 +1098,42 @@ class EditSidebar(QWidget):
             self._canvas.set_grid_size(m.grid_cols, m.grid_rows)
             target = (m.grid_rows - 1, 0)
 
-        info = SOURCE_REGISTRY[dlg.chosen_key]
         self._canvas.add_slot(LayoutSlot(
             source_key  = dlg.chosen_key,
-            label       = "",   # blank = use registry default
+            label       = "",
             unit        = "",
             min_val     = 0,
             max_val     = 100,
             danger_from = 80,
             row         = target[0],
             col         = target[1],
+            slot_type   = "gauge",
         ))
+
+    def _add_divider(self):
+        # Determine insertion row: above selected gauge's row, or top of grid
+        m = self._canvas._model
+        if self._idx >= 0:
+            before_row = m.slots[self._idx].row
+        else:
+            before_row = 0
+
+        # Ask for a label
+        label, ok = _simple_input(
+            self, "Add Divider",
+            "Divider label (e.g. EPIC PROD):",
+            placeholder="GROUP LABEL",
+        )
+        if not ok:
+            return
+        label = label.strip() or "GROUP"
+
+        # Ask which host to link (for status dot)
+        self._refresh_div_host_combo()
+        host_key = ""   # default: no dot; user can edit in sidebar after add
+
+        self._canvas.add_divider(before_row, label, host_key)
+        self._rows.setValue(m.grid_rows)
 
     def _resize_grid(self):
         self._canvas.set_grid_size(self._cols.value(), self._rows.value())
@@ -867,6 +1155,34 @@ class EditSidebar(QWidget):
 
 
 # ============================================================
+#  Simple single-field input dialog
+# ============================================================
+
+def _simple_input(parent, title: str, prompt: str,
+                  default: str = "", placeholder: str = "") -> tuple:
+    """Returns (text, ok)."""
+    dlg = QDialog(parent)
+    dlg.setWindowTitle(title)
+    dlg.setStyleSheet(_sidebar_style())
+    dlg.setMinimumWidth(280)
+    vbox = QVBoxLayout(dlg)
+    vbox.addWidget(QLabel(prompt))
+    edit = QLineEdit(default)
+    edit.setPlaceholderText(placeholder)
+    vbox.addWidget(edit)
+    row = QHBoxLayout()
+    ok_btn = QPushButton("OK")
+    ok_btn.clicked.connect(dlg.accept)
+    cancel_btn = QPushButton("Cancel")
+    cancel_btn.clicked.connect(dlg.reject)
+    row.addWidget(ok_btn)
+    row.addWidget(cancel_btn)
+    vbox.addLayout(row)
+    ok = dlg.exec() == QDialog.Accepted
+    return edit.text(), ok
+
+
+# ============================================================
 #  DesignerWindow
 # ============================================================
 
@@ -880,7 +1196,8 @@ class DesignerWindow(QMainWindow):
 
         model         = _load_or_default()
         theme_info    = THEME_REGISTRY.get(model.theme_key, THEME_REGISTRY["wwii"])
-        self._canvas  = LayoutCanvas(model, theme_info["factory"]())
+        self._canvas  = LayoutCanvas(model, theme_info["factory"](),
+                                     theme_key=model.theme_key)
         self._sidebar = EditSidebar(self._canvas)
         self._sidebar.sync_theme_combo(model.theme_key)
         self._sidebar.hide()
@@ -894,7 +1211,6 @@ class DesignerWindow(QMainWindow):
         hbox.addWidget(self._sidebar, 0)
         self.setCentralWidget(self._container)
 
-        # Toolbar
         tb = self.addToolBar("Main")
         tb.setMovable(False)
         self._edit_action = tb.addAction("✏  Edit Layout  [E]")
@@ -902,16 +1218,14 @@ class DesignerWindow(QMainWindow):
         self._edit_action.triggered.connect(self.toggle_edit_mode)
 
         self.resize(960, 660)
-        self.update_bg(theme_info)   # apply full chrome for the loaded theme
+        self.update_bg(theme_info)
 
-        # QShortcut works regardless of which child widget has focus
         QShortcut(QKeySequence("E"), self).activated.connect(self.toggle_edit_mode)
         QShortcut(QKeySequence(Qt.Key_Escape), self).activated.connect(
             lambda: self.set_edit_mode(False)
         )
 
     def update_bg(self, theme_info: dict):
-        """Update all window chrome to match the active theme."""
         bg  = theme_info["bg"]
         tbg = theme_info["toolbar_bg"]
         tfg = theme_info["toolbar_fg"]
@@ -933,7 +1247,6 @@ class DesignerWindow(QMainWindow):
         self._sidebar.setVisible(enabled)
         self._edit_action.setChecked(enabled)
         if not enabled:
-            # Auto-save layout on exit
             self._canvas._model.save(_layout_path())
 
 
@@ -955,7 +1268,6 @@ def _load_or_default() -> LayoutModel:
             return LayoutModel.load(p)
         except Exception:
             pass
-    # Default 3×2 layout
     return LayoutModel(
         grid_cols=3, grid_rows=2, theme_key="wwii",
         slots=[
@@ -978,8 +1290,6 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO,
                         format="%(levelname)s  %(name)s  %(message)s")
 
-    # Load remote hosts before building the window so their sources
-    # appear in the gauge picker immediately.
     host_registry.load(_hosts_path(), SOURCE_REGISTRY)
     atexit.register(host_registry.stop_all)
 

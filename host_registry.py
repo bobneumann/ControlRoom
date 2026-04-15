@@ -116,6 +116,17 @@ def stop_all():
         h.stop()
 
 
+def get_host_status(key_prefix: str) -> str:
+    """
+    Return connection status for the host whose name normalises to key_prefix.
+    Returns one of: "connected" | "connecting" | "error" | "disconnected"
+    """
+    for h in _active_hosts:
+        if _key(h.name) == key_prefix:
+            return h.status
+    return "disconnected"
+
+
 # ── internal ──────────────────────────────────────────────────────────────── #
 
 def _key(name: str) -> str:
