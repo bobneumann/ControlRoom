@@ -1,21 +1,82 @@
 [
+  {"_comment": "Copy this file to hosts.json.  Each entry is one monitored device."},
+
   {
-    "_comment": "Copy this file to hosts.json and fill in your real values.",
-    "name":   "My Linux Server",
-    "host":   "192.168.1.10",
-    "port":   22,
-    "user":   "admin",
-    "key":    "C:/Users/YourName/.ssh/id_rsa",
-    "os":     "linux",
-    "poll_s": 2.0
+    "key":          "linux_server",
+    "label":        "Linux Server",
+    "type":         "ssh",
+    "poll_interval": 2,
+    "collector": {
+      "host":     "192.168.1.10",
+      "port":     22,
+      "user":     "admin",
+      "key":      "C:/Users/YourName/.ssh/id_rsa",
+      "os":       "linux"
+    }
   },
+
   {
-    "name":   "My Windows Server",
-    "host":   "192.168.1.20",
-    "port":   22,
-    "user":   "administrator",
-    "key":    "C:/Users/YourName/.ssh/id_rsa",
-    "os":     "windows",
-    "poll_s": 2.0
+    "key":          "windows_server",
+    "label":        "Windows Server",
+    "type":         "ssh",
+    "poll_interval": 2,
+    "collector": {
+      "host":     "192.168.1.20",
+      "port":     22,
+      "user":     "administrator",
+      "key":      "C:/Users/YourName/.ssh/id_rsa",
+      "os":       "windows"
+    }
+  },
+
+  {
+    "key":          "main_switch",
+    "label":        "Main Switch",
+    "type":         "snmp",
+    "poll_interval": 30,
+    "collector": {
+      "host":      "192.168.1.1",
+      "community": "public",
+      "oids": {
+        "uptime":  "1.3.6.1.2.1.1.3.0",
+        "cpu_pct": "1.3.6.1.4.1.9.2.1.56.0"
+      },
+      "health_rules": [
+        {"metric": "uptime",  "error_if_zero": true},
+        {"metric": "cpu_pct", "warn_above": 70, "error_above": 90}
+      ]
+    },
+    "gauges": [
+      {"source": "cpu_pct", "label": "Switch CPU", "unit": "%", "min": 0, "max": 100, "danger_from": 70}
+    ]
+  },
+
+  {
+    "key":          "lighting_ctrl",
+    "label":        "Lighting Controller",
+    "type":         "http",
+    "poll_interval": 30,
+    "collector": {
+      "host":       "192.168.1.50",
+      "login_url":  "/login",
+      "login_data": {"username": "admin", "password": "admin"},
+      "status_url": "/status",
+      "checks": [
+        {"type": "http_ok"},
+        {"type": "text_present", "text": "Running"}
+      ]
+    }
+  },
+
+  {
+    "key":          "front_camera",
+    "label":        "Front Camera",
+    "type":         "tcp",
+    "poll_interval": 15,
+    "collector": {
+      "host":    "192.168.1.60",
+      "port":    80,
+      "timeout": 5
+    }
   }
 ]

@@ -1,77 +1,45 @@
 """
-Host registry — loads hosts.json, starts RemoteHost instances, and
-injects their metric sources into the designer's SOURCE_REGISTRY.
+Host registry — loads hosts.json, starts CollectorHost instances, and injects
+their metric sources into the designer's SOURCE_REGISTRY.
 
-hosts.json format (place next to designer.py):
-[
-  {
-    "name":    "Epic Prod",
-    "host":    "phcldc21001",
-    "port":    22,
-    "user":    "epicadm",
-    "key":     "C:/Users/Bob/.ssh/id_rsa",
-    "os":      "linux",
-    "poll_s":  2.0
-  },
-  {
-    "name":    "App Server",
-    "host":    "192.168.1.50",
-    "user":    "admin",
-    "key":     "C:/Users/Bob/.ssh/id_rsa",
-    "os":      "windows",
-    "poll_s":  2.0
-  }
-]
+hosts.json is the single place to define every monitored device.  Each entry
+specifies the device key, label, collector type, polling interval, and all
+type-specific connection/health/metric settings.  See hosts.json.example.
 
-Fields:
-  name     Display name shown in gauge picker and labels
-  host     Hostname or IP
-  port     SSH port (default 22)
-  user     SSH username
-  key      Path to private key file (recommended)
-  password SSH password (alternative to key; not recommended)
-  os       "linux" or "windows"  (default "linux")
-  poll_s   Poll interval in seconds (default 2.0)
+After load(), SOURCE_REGISTRY gains entries keyed as "{device_key}:{metric}":
 
-After load(), SOURCE_REGISTRY gains entries like:
-  "epic_prod:cpu"     "Epic Prod — CPU"       %
-  "epic_prod:ram"     "Epic Prod — RAM"       %
-  "epic_prod:disk"    "Epic Prod — Disk"      %
-  "epic_prod:net_in"  "Epic Prod — Net In"    MB/s
-  "epic_prod:net_out" "Epic Prod — Net Out"   MB/s
-  "epic_prod:core_0"  "Epic Prod — Core 0"    %
-  ... up to core_7
+  SSH device "epic_prod":
+    epic_prod:cpu, epic_prod:ram, epic_prod:disk,
+    epic_prod:net_in, epic_prod:net_out, epic_prod:ctx_rate, epic_prod:load1,
+    epic_prod:core_0 … epic_prod:core_7, epic_prod:health
+
+  SNMP device "main_switch" with oids {uptime, cpu_pct}:
+    main_switch:uptime, main_switch:cpu_pct, main_switch:health
+
+  HTTP/TCP device "camera_front":
+    camera_front:up, camera_front:http_status (or latency_ms), camera_front:health
+
+Gauge label/unit/range overrides come from the optional "gauges" array in each
+device config entry.
 """
 
 import os
 import json
 import logging
-from typing import Optional
 
 log = logging.getLogger(__name__)
 
-try:
-    from remote_host import RemoteHost, _PARAMIKO_OK
-except ImportError:
-    RemoteHost  = None
-    _PARAMIKO_OK = False
+_active: list = []
 
-_active_hosts: list = []
 
+# ── public API ──────────────────────────────────────────────────────────── #
 
 def load(hosts_path: str, source_registry: dict) -> list:
     """
-    Read hosts.json, create RemoteHost instances, inject sources into
-    source_registry, start background threads.
-
-    Returns the list of RemoteHost objects (keep a reference to call
-    stop_all() on shutdown).
+    Read hosts.json, create and start CollectorHost instances, inject sources.
+    Returns the list of hosts (keep a reference; call stop_all() on shutdown).
     """
-    global _active_hosts
-
-    if not _PARAMIKO_OK:
-        log.warning("paramiko missing — remote hosts not loaded.")
-        return []
+    global _active
 
     if not os.path.exists(hosts_path):
         return []
@@ -83,83 +51,125 @@ def load(hosts_path: str, source_registry: dict) -> list:
         log.error("Cannot read %s: %s", hosts_path, exc)
         return []
 
+    from collector_host import CollectorHost
+
     hosts = []
     for cfg in configs:
-        # Skip comment/example entries
         if cfg.get("_comment"):
             continue
+        key = cfg.get("key", "?")
         try:
-            h = RemoteHost(
-                name     = cfg["name"],
-                host     = cfg["host"],
-                port     = cfg.get("port", 22),
-                user     = cfg["user"],
-                key_path = cfg.get("key"),
-                password = cfg.get("password"),
-                os       = cfg.get("os", "linux"),
-                poll_s   = cfg.get("poll_s", 2.0),
-            )
-            _register(h, source_registry)
-            h.start()
-            hosts.append(h)
-            log.info("Loaded remote host: %s (%s)", h.name, cfg["host"])
+            poll_fn = _get_poll_fn(cfg["type"])
+            if poll_fn is None:
+                log.warning("No collector for type %r (%s) — skipped", cfg["type"], key)
+                continue
+            host = CollectorHost(cfg, poll_fn)
+            _register(host, cfg, source_registry)
+            host.start()
+            hosts.append(host)
+            log.info("Loaded %s device: %s", cfg["type"], key)
         except Exception as exc:
-            log.error("Bad host config %s: %s", cfg.get("name", "?"), exc)
+            log.error("Bad config for %s: %s", key, exc)
 
-    _active_hosts = hosts
+    _active = hosts
     return hosts
 
 
 def stop_all():
     """Stop all background polling threads.  Call on app exit."""
-    for h in _active_hosts:
+    for h in _active:
         h.stop()
 
 
-def get_host_status(key_prefix: str) -> str:
+def get_host_status(key: str) -> str:
     """
-    Return connection status for the host whose name normalises to key_prefix.
-    Returns one of: "connected" | "connecting" | "error" | "disconnected"
+    Return display status for the device with this key.
+    Used by DividerWidget status dots.
+    Returns: "connected" | "connecting" | "error" | "disconnected"
     """
-    for h in _active_hosts:
-        if _key(h.name) == key_prefix:
+    for h in _active:
+        if h.key == key:
             return h.status
     return "disconnected"
 
 
-# ── internal ──────────────────────────────────────────────────────────────── #
+# ── collector dispatch ───────────────────────────────────────────────────── #
 
-def _key(name: str) -> str:
-    """Normalise host name to a SOURCE_REGISTRY key prefix."""
-    return name.lower().replace(" ", "_").replace("-", "_")
+def _get_poll_fn(type_str: str):
+    t = type_str.lower()
+    try:
+        if t == "ssh":
+            from collectors import ssh_host
+            return ssh_host.poll
+        if t == "snmp":
+            from collectors import snmp_v2c
+            return snmp_v2c.poll
+        if t == "http":
+            from collectors import http_session
+            return http_session.poll
+        if t == "tcp":
+            from collectors import tcp_check
+            return tcp_check.poll
+    except ImportError as exc:
+        log.error("Cannot load collector %r: %s", t, exc)
+    return None
 
 
-def _register(host: "RemoteHost", registry: dict):
-    """Add all metric sources for one host into source_registry."""
-    p = _key(host.name)
-    n = host.name
+# ── SOURCE_REGISTRY registration ─────────────────────────────────────────── #
 
-    # Pre-create net-rate callables (stateful; shared across all gauges
-    # for this host so they all see the same rate reading)
-    net_in_src  = host.net_rate_source("recv")
-    net_out_src = host.net_rate_source("sent")
+def _register(host, cfg: dict, registry: dict):
+    device_key  = host.key
+    label       = cfg.get("label", device_key)
+    c_type      = cfg.get("type", "").lower()
 
-    entries = {
-        f"{p}:cpu":      {"label": f"{n} — CPU",         "unit": "%",       "factory": lambda h=host: h.source("cpu")},
-        f"{p}:ram":      {"label": f"{n} — RAM",         "unit": "%",       "factory": lambda h=host: h.source("ram")},
-        f"{p}:disk":     {"label": f"{n} — Disk",        "unit": "%",       "factory": lambda h=host: h.source("disk")},
-        f"{p}:net_in":   {"label": f"{n} — Net In",      "unit": "MB/s",    "factory": lambda s=net_in_src:  (lambda: s())},
-        f"{p}:net_out":  {"label": f"{n} — Net Out",     "unit": "MB/s",    "factory": lambda s=net_out_src: (lambda: s())},
-        f"{p}:ctx_rate": {"label": f"{n} — CTX SW",      "unit": "× 10 /s", "factory": lambda h=host: h.source("ctx_rate")},
-        f"{p}:load1":    {"label": f"{n} — Load Avg",    "unit": "× 0.05",  "factory": lambda h=host: h.source("load1")},
-    }
-    for i in range(8):
-        entries[f"{p}:core_{i}"] = {
-            "label":   f"{n} — Core {i}",
-            "unit":    "%",
-            "factory": lambda h=host, k=f"core_{i}": h.source(k),
+    # Optional per-metric overrides from the "gauges" array
+    overrides = {g["source"]: g for g in cfg.get("gauges", []) if "source" in g}
+
+    def _entry(metric_key, default_label, default_unit,
+               min_=0.0, max_=100.0, danger=80.0):
+        ov = overrides.get(metric_key, {})
+        src_key = f"{device_key}:{metric_key}"
+        return {
+            "label":   ov.get("label",      f"{label} — {default_label}"),
+            "unit":    ov.get("unit",        default_unit),
+            "min":     ov.get("min",         min_),
+            "max":     ov.get("max",         max_),
+            "danger":  ov.get("danger_from", danger),
+            "group":   label,
+            "factory": (lambda h=host, k=metric_key: h.source(k)),
         }
 
-    for key, info in entries.items():
-        info["group"] = n   # used by picker to group under host name
-        registry[key] = info
+    # Health is registered for every device type (used by Ops Board)
+    registry[f"{device_key}:health"] = {
+        "label":   f"{label} — Health",
+        "unit":    "",
+        "group":   label,
+        "factory": (lambda h=host: (lambda: 1.0 if h.health == "good" else 0.0)),
+    }
+
+    if c_type == "ssh":
+        registry[f"{device_key}:cpu"]      = _entry("cpu",      "CPU",      "%",    0,   100,  80)
+        registry[f"{device_key}:ram"]      = _entry("ram",      "RAM",      "%",    0,   100,  85)
+        registry[f"{device_key}:disk"]     = _entry("disk",     "Disk",     "%",    0,   100,  90)
+        registry[f"{device_key}:net_in"]   = _entry("net_in",   "Net In",   "MB/s", 0,   100,  80)
+        registry[f"{device_key}:net_out"]  = _entry("net_out",  "Net Out",  "MB/s", 0,   100,  80)
+        registry[f"{device_key}:ctx_rate"] = _entry("ctx_rate", "CTX SW",   "×10/s",0,  100,  80)
+        registry[f"{device_key}:load1"]    = _entry("load1",    "Load Avg", "×0.05",0,  100,  80)
+        for i in range(8):
+            registry[f"{device_key}:core_{i}"] = _entry(
+                f"core_{i}", f"Core {i}", "%", 0, 100, 80
+            )
+
+    elif c_type == "snmp":
+        for metric_name in cfg.get("collector", {}).get("oids", {}).keys():
+            registry[f"{device_key}:{metric_name}"] = _entry(
+                metric_name, metric_name, "", 0, 100, 80
+            )
+
+    elif c_type == "http":
+        registry[f"{device_key}:up"]          = _entry("up",          "Up",          "",   0, 1,   0.5)
+        registry[f"{device_key}:http_status"] = _entry("http_status", "HTTP Status", "",   0, 599, 399)
+
+    elif c_type == "tcp":
+        registry[f"{device_key}:up"]         = _entry("up",         "Up",      "",   0, 1,    0.5)
+        registry[f"{device_key}:latency_ms"] = _entry("latency_ms", "Latency", "ms", 0, 5000, 1000)
