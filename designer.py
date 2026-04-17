@@ -451,7 +451,7 @@ class LayoutCanvas(QWidget):
     slot_selected = Signal(int)   # emits slot index (-1 = none selected)
 
     def __init__(self, model: LayoutModel, theme=None, theme_key: str = "wwii",
-                 poll_ms: int = 1000, fps: int = 60, parent=None):
+                 poll_ms: int = 1000, fps: int = 30, parent=None):
         super().__init__(parent)
         self._model     = model
         self._theme     = theme or theme_wwii_cockpit()
@@ -574,7 +574,11 @@ class LayoutCanvas(QWidget):
 
     def _repaint_all(self):
         for w in self._widgets:
-            w.update()
+            if isinstance(w, Gauge):
+                if w.tick():
+                    w.update()
+            else:
+                w.update()
 
     # ── resize ───────────────────────────────────────────────────────── #
 

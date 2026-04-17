@@ -234,6 +234,15 @@ class Gauge(QWidget):
     def value(self, v):
         self._value = max(self.config.min_val, min(self.config.max_val, v))
 
+    def tick(self) -> bool:
+        """Advance needle lerp. Returns True if display value moved meaningfully."""
+        prev = self._display_value
+        self._display_value += (self._value - self._display_value) * 0.15
+        rng = self.config.max_val - self.config.min_val
+        if rng > 0 and abs(self._display_value - self._value) < rng * 0.0005:
+            self._display_value = self._value
+        return abs(self._display_value - prev) > (rng * 0.0001 if rng > 0 else 0.0001)
+
     def _val_to_qt_angle(self, v):
         """Map value → Qt painter angle (0=3oclock, CCW positive)."""
         cfg = self.config
@@ -501,7 +510,6 @@ class Gauge(QWidget):
     def _draw_needle(self, p):
         t = self.theme
         cx, cy = 200, 200
-        self._display_value += (self._value - self._display_value) * 0.15
         frac      = (self._display_value - self.config.min_val) / (self.config.max_val - self.config.min_val)
         angle_deg = self.config.start_angle + frac * self.config.sweep
         angle_rad = math.radians(angle_deg)
