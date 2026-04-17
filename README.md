@@ -1,10 +1,19 @@
-# InstrumentPanel
+# Control Room
 
-Skeuomorphic live machine metrics dashboard built with Python + PySide6.
-Displays CPU, RAM, disk, network, and per-core usage as themed analog gauges —
-no agents installed on monitored machines.
+A skeuomorphic live monitoring dashboard built with Python + PySide6.
+Pull-only, agentless — monitors remote Linux/Windows hosts over SSH, with no software installed on monitored machines.
 
-![WWII Cockpit theme with live gauges]
+## Views
+
+### Instrument Panel
+Live machine metrics displayed as themed analog gauges — CPU, RAM, disk, network, per-core usage.
+Needles animate at 60 fps between 1–2 s poll intervals. Built for sysadmins and ops staff who want the
+satisfying feeling of watching well-tuned machines do their job.
+
+### Ops Board *(planned)*
+A spatial map of a physical environment — entities placed at their real-world positions on a floor plan,
+each showing overall health (green/red) with diagnostic detail on click. Built for non-technical audiences
+who need a single glance to confirm "all systems go."
 
 ## Features
 
