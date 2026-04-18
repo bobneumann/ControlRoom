@@ -1,7 +1,15 @@
+# GUI client
 PySide6>=6.6.0
 paramiko>=3.4.0
 psutil>=5.9.0
-requests>=2.31.0
-# SNMP: no Python library needed — uses system snmpget binary
-# Windows: choco install net-snmp
-# Linux:   sudo apt install snmp
+
+# Daemon
+fastapi
+uvicorn[standard]
+
+# WebSocket client (ws_registry — used by GUI when connecting to daemon)
+websockets
+
+# SNMP: no Python package — uses system snmpget binary via subprocess
+# Windows (WSL): sudo apt install snmp  (inside WSL)
+# Linux native:  sudo apt install snmp
