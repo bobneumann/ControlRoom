@@ -1600,10 +1600,11 @@ class _DefinitionDialog(QDialog):
             QMessageBox.warning(self, "Save Error", str(exc))
             return
 
-        # Hot-update in-memory collector config (takes effect on next poll)
+        # Hot-update in-memory collector config (local mode only; no-op in daemon mode)
         for h in host_registry._active:
             if h.key == self._device_key:
-                h._config.setdefault("collector", {})["health_rules"] = new_rules
+                if hasattr(h, "_config"):
+                    h._config.setdefault("collector", {})["health_rules"] = new_rules
                 break
 
         self.accept()
