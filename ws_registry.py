@@ -63,6 +63,11 @@ class _RemoteHost:
     def source(self, key: str):
         return lambda: self.get(key)
 
+    @property
+    def metrics(self) -> dict:
+        with self._lock:
+            return dict(self._metrics)
+
     def update(self, health: str, message: str, metrics: dict):
         with self._lock:
             self.health   = health

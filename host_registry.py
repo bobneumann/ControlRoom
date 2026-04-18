@@ -93,6 +93,17 @@ def get_host_status(key: str) -> str:
     return "disconnected"
 
 
+def get_host_snapshot(key: str) -> dict:
+    """
+    Return {health, message, metrics} for the device — used by hover tooltips.
+    Works for both local CollectorHost and ws_registry _RemoteHost stubs.
+    """
+    for h in _active:
+        if h.key == key:
+            return {"health": h.health, "message": h.message, "metrics": h.metrics}
+    return {"health": "unknown", "message": "", "metrics": {}}
+
+
 def get_host_health(key: str) -> str:
     """
     Return health-aware status for the device with this key.

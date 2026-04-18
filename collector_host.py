@@ -61,6 +61,11 @@ class CollectorHost:
         """Return a zero-arg callable that reads one metric from the cache."""
         return lambda: self.get(key)
 
+    @property
+    def metrics(self) -> dict:
+        with self._lock:
+            return dict(self._metrics)
+
     # ── internals ────────────────────────────────────────────────────────── #
 
     def _loop(self):

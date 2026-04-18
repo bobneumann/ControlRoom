@@ -17,7 +17,7 @@ from datetime import datetime
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QComboBox, QPushButton, QFrame, QDialog, QFileDialog,
+    QComboBox, QPushButton, QFrame, QDialog, QFileDialog, QToolTip,
 )
 from PySide6.QtCore import Qt, QTimer, QRect, QRectF, QPointF, Signal
 from PySide6.QtGui import (
@@ -193,6 +193,35 @@ def _health_color(key: str) -> QColor:
     if not key:
         return _HEALTH_GRAY
     return _HEALTH_COLORS.get(host_registry.get_host_health(key), _HEALTH_GRAY)
+
+
+_STATUS_WORD = {
+    "good":       "GREEN",
+    "warning":    "AMBER",
+    "error":      "RED",
+    "connecting": "CONNECTING",
+    "unknown":    "UNKNOWN",
+}
+
+def _format_tooltip(label: str, key: str) -> str:
+    snap    = host_registry.get_host_snapshot(key)
+    health  = snap.get("health", "unknown")
+    message = snap.get("message", "")
+    metrics = snap.get("metrics", {})
+    status  = _STATUS_WORD.get(health, health.upper())
+
+    if health == "good":
+        return f"{label}:  {status}\n{message}" if message else f"{label}:  {status}"
+
+    lines = [f"{label}:  {status}"]
+    if message:
+        lines.append(f'  "{message}"')
+    if metrics:
+        lines.append("")
+        for k, v in list(metrics.items())[:5]:
+            val = f"{v:.1f}" if isinstance(v, float) else str(v)
+            lines.append(f"  {k}: {val}")
+    return "\n".join(lines)
 
 
 # ── canvas constants ──────────────────────────────────────────────────────────
@@ -520,10 +549,23 @@ class OpsBoardCanvas(QWidget):
             self._select(-1)
 
     def mouseMoveEvent(self, event):
-        if self._drag_mode is None:
+        if self._drag_mode is not None:
+            self._drag_pos = event.position()
+            self.update()
             return
-        self._drag_pos = event.position()
-        self.update()
+
+        # Hover tooltip (live and edit mode)
+        pos  = event.position()
+        x, y = pos.x(), pos.y()
+        for e in self._model.entities:
+            if e.x is None:
+                continue
+            ep = self._entity_pixel(e)
+            if (x - ep.x()) ** 2 + (y - ep.y()) ** 2 <= (_ENT_R + 10) ** 2:
+                tip = _format_tooltip(e.label, e.key)
+                QToolTip.showText(event.globalPosition().toPoint(), tip, self)
+                return
+        QToolTip.hideText()
 
     def mouseReleaseEvent(self, event):
         if self._drag_mode is None:
