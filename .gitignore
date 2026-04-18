@@ -1,6 +1,9 @@
-# User-specific configuration (contains hostnames, credentials)
+# User-specific configuration (contains hostnames, credentials, layout state)
 hosts.json
 layout.json
+layout_*.json
+ops_board.json
+slates.json
 
 # SSH keys (never commit)
 *.key
