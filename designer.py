@@ -2071,10 +2071,16 @@ if __name__ == "__main__":
                         help="Full-screen read-only mode")
     parser.add_argument("--slate", metavar="NAME", default=None,
                         help="Name of the slate to load on startup")
+    parser.add_argument("--daemon", metavar="URL", default=None,
+                        help="Daemon URL, e.g. http://192.168.1.10:8765")
     args = parser.parse_args()
 
-    host_registry.load(_hosts_path(), SOURCE_REGISTRY)
-    atexit.register(host_registry.stop_all)
+    if args.daemon:
+        import ws_registry
+        ws_registry.connect(args.daemon, _hosts_path(), SOURCE_REGISTRY)
+    else:
+        host_registry.load(_hosts_path(), SOURCE_REGISTRY)
+        atexit.register(host_registry.stop_all)
 
     app = QApplication(sys.argv)
     win = DesignerWindow(kiosk=args.kiosk, initial_slate=args.slate)
