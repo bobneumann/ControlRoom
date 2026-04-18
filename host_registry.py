@@ -83,7 +83,7 @@ def stop_all():
 
 def get_host_status(key: str) -> str:
     """
-    Return display status for the device with this key.
+    Return connection status for the device with this key.
     Used by DividerWidget status dots.
     Returns: "connected" | "connecting" | "error" | "disconnected"
     """
@@ -91,6 +91,20 @@ def get_host_status(key: str) -> str:
         if h.key == key:
             return h.status
     return "disconnected"
+
+
+def get_host_health(key: str) -> str:
+    """
+    Return health-aware status for the device with this key.
+    Used by Ops Board entity dots — preserves warning (amber) state.
+    Returns: "good" | "warning" | "error" | "connecting" | "unknown"
+    """
+    for h in _active:
+        if h.key == key:
+            if h.status == "connecting":
+                return "connecting"
+            return h.health
+    return "unknown"
 
 
 # ── collector dispatch ───────────────────────────────────────────────────── #

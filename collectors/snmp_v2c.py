@@ -38,8 +38,9 @@ def poll(config: dict, state: dict) -> tuple[dict, dict]:
         return {"health": "unknown", "message": "No OIDs configured", "metrics": {}}, state
 
     # Single subprocess call fetches all OIDs at once
+    # snmpget_path may be "wsl snmpget" or similar — split on spaces
     cmd = [
-        snmpget,
+        *snmpget.split(),
         "-v", "2c",
         "-c", community,
         "-OqnT",          # quiet, numeric OIDs, timeticks as integers
@@ -116,6 +117,12 @@ def poll(config: dict, state: dict) -> tuple[dict, dict]:
         elif "warn_above" in rule and val > rule["warn_above"] and health == "good":
             health  = "warning"
             message = f"{metric} {val:.1f} > {rule['warn_above']}"
+        elif "error_below" in rule and val < rule["error_below"]:
+            health  = "error"
+            message = f"{metric} {val:.1f} < {rule['error_below']}"
+        elif "warn_below" in rule and val < rule["warn_below"] and health == "good":
+            health  = "warning"
+            message = f"{metric} {val:.1f} < {rule['warn_below']}"
 
     if failed:
         health  = "error"

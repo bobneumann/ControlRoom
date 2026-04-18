@@ -20,6 +20,7 @@ In edit mode:
 import os
 import sys
 import json
+import math
 import logging
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Callable
@@ -29,14 +30,20 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QVBoxLayout,
     QLabel, QComboBox, QLineEdit,
     QDoubleSpinBox, QSpinBox, QCheckBox,
-    QPushButton, QFrame,
-    QDialog, QListWidget, QListWidgetItem, QMessageBox,
+    QPushButton, QFrame, QStackedWidget, QScrollArea,
+    QDialog, QListWidget, QListWidgetItem, QMessageBox, QMenu,
 )
 from PySide6.QtCore import Qt, QTimer, QRect, Signal
-from PySide6.QtGui import QPainter, QColor, QPen, QFont, QShortcut, QKeySequence
+from PySide6.QtGui import QPainter, QColor, QPen, QFont, QShortcut, QKeySequence, QCursor
 
 import host_registry
 from gauge import Gauge, GaugeConfig, GaugeTheme, theme_wwii_cockpit, theme_f1_racing
+from ops_board import (OpsBoardCanvas, OpsBoardSidebar, OpsBoardLayout,
+                       ops_board_path)
+from slates import SlateManager, Slate
+
+# Module-level slate manager — set during DesignerWindow init
+_slate_mgr: Optional[SlateManager] = None
 from datasources import (
     cpu_total, cpu_core, ram_percent,
     disk_percent, net_bytes_recv_rate, net_bytes_sent_rate,
@@ -46,6 +53,27 @@ from datasources import (
 # ============================================================
 #  Sidebar style (defined here so THEME_REGISTRY can call it)
 # ============================================================
+
+def _plain_dialog_style() -> str:
+    """Light system-like style for modal dialogs — overrides any inherited dark theme."""
+    return """
+    QDialog     { background: #f0f0f0; }
+    QWidget     { background: #f0f0f0; color: #000000; }
+    QListWidget { background: white; color: black; border: 1px solid #aaaaaa; }
+    QListWidget::item:selected { background: #0078d7; color: white; }
+    QListWidget::item:hover    { background: #e5f3ff; color: black; }
+    QPushButton { background: #e1e1e1; color: black;
+                  border: 1px solid #adadad; padding: 4px 12px; }
+    QPushButton:hover   { background: #e8e8e8; }
+    QPushButton:pressed { background: #cccccc; }
+    QLineEdit { background: white; color: black;
+                border: 1px solid #aaaaaa; padding: 2px 4px; }
+    QComboBox { background: white; color: black;
+                border: 1px solid #aaaaaa; padding: 2px 4px; }
+    QComboBox QAbstractItemView { background: white; color: black; }
+    QLabel { color: #333333; font-size: 9px; background: transparent; }
+    """
+
 
 def _sidebar_style(bg="#191c12", input_bg="#22261a", border="#404530",
                    fg="#c8bfa8", dim="#8a8270",
@@ -802,17 +830,13 @@ class _GaugePickerDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Add Gauge")
         self.setMinimumWidth(280)
+        self.setStyleSheet(_plain_dialog_style())
         self.chosen_key: Optional[str] = None
-        self.setStyleSheet(_sidebar_style())
 
         vbox = QVBoxLayout(self)
         vbox.addWidget(QLabel("Choose a data source:"))
 
         self._list = QListWidget()
-        self._list.setStyleSheet(
-            "QListWidget { background: #22261a; color: #c8bfa8; border: 1px solid #404530; }"
-            "QListWidget::item:selected { background: #3e4230; }"
-        )
         self._populate_list()
         self._list.setCurrentRow(0)
         self._list.doubleClicked.connect(self._confirm)
@@ -1273,8 +1297,8 @@ def _simple_input(parent, title: str, prompt: str,
     """Returns (text, ok)."""
     dlg = QDialog(parent)
     dlg.setWindowTitle(title)
-    dlg.setStyleSheet(_sidebar_style())
     dlg.setMinimumWidth(280)
+    dlg.setStyleSheet(_plain_dialog_style())
     vbox = QVBoxLayout(dlg)
     vbox.addWidget(QLabel(prompt))
     edit = QLineEdit(default)
@@ -1327,17 +1351,436 @@ class _PanelContainer(QWidget):
 
 
 # ============================================================
+#  Device layout helpers
+# ============================================================
+
+def _device_layout_path(device_key: str) -> str:
+    base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, f"layout_{device_key}.json")
+
+
+def _auto_layout_for_device(device_key: str, registry: dict,
+                             theme_key: str = "wwii") -> LayoutModel:
+    """Build a gauge grid from all SOURCE_REGISTRY entries for this device."""
+    prefix = f"{device_key}:"
+    keys   = sorted(k for k in registry
+                    if k.startswith(prefix) and not k.endswith(":health"))
+    cols   = 3
+    slots  = []
+    for i, src_key in enumerate(keys):
+        info = registry[src_key]
+        slots.append(LayoutSlot(
+            source_key  = src_key,
+            label       = "",
+            unit        = "",
+            min_val     = info.get("min", 0.0),
+            max_val     = info.get("max", 100.0),
+            danger_from = info.get("danger", 80.0),
+            row         = i // cols,
+            col         = i % cols,
+        ))
+    rows = max(1, math.ceil(len(slots) / cols))
+    return LayoutModel(grid_cols=cols, grid_rows=rows,
+                       theme_key=theme_key, slots=slots)
+
+
+# ============================================================
+#  _DefinitionDialog — GUI editor for a device's health rules
+# ============================================================
+
+_CONDITIONS = [
+    ("warn_above",    "warn above"),
+    ("error_above",   "error above"),
+    ("warn_below",    "warn below"),
+    ("error_below",   "error below"),
+    ("error_if_zero", "error if zero"),
+]
+
+
+class _DefinitionDialog(QDialog):
+
+    def __init__(self, device_key: str, hosts_path: str,
+                 source_registry: dict, parent=None):
+        super().__init__(parent)
+        self._device_key = device_key
+        self._hosts_path = hosts_path
+        self._registry   = source_registry
+        self._rule_rows: list = []
+
+        prefix = f"{device_key}:"
+        self._metrics = sorted(
+            k[len(prefix):]
+            for k in source_registry
+            if k.startswith(prefix) and not k.endswith(":health")
+        )
+
+        self._device_cfg, self._initial_rules = self._load_from_file()
+        device_label = self._device_cfg.get("label", device_key)
+
+        self.setWindowTitle(f"Definition — {device_label}")
+        self.setMinimumWidth(500)
+        self.setStyleSheet(_plain_dialog_style())
+        self._build_ui(device_label)
+
+    # ── load / save ───────────────────────────────────────────────────────── #
+
+    def _load_from_file(self) -> tuple:
+        """Returns (device_cfg_dict, list_of_parsed_rules)."""
+        try:
+            with open(self._hosts_path) as f:
+                configs = json.load(f)
+            for cfg in configs:
+                if cfg.get("key") == self._device_key:
+                    rules = []
+                    for rule in cfg.get("collector", {}).get("health_rules", []):
+                        metric = rule.get("metric", "")
+                        for cond_key, _ in _CONDITIONS:
+                            if cond_key == "error_if_zero":
+                                if rule.get("error_if_zero"):
+                                    rules.append({"metric": metric,
+                                                  "cond": "error_if_zero",
+                                                  "value": 0.0})
+                            elif cond_key in rule:
+                                rules.append({"metric": metric,
+                                              "cond": cond_key,
+                                              "value": float(rule[cond_key])})
+                    return cfg, rules
+        except Exception:
+            pass
+        return {}, []
+
+    def _collect_rules(self) -> list:
+        """Read current row widgets into a hosts.json-ready health_rules list."""
+        result = []
+        for row in self._rule_rows:
+            metric = row["metric"].currentText()
+            cond   = row["cond"].currentData()
+            val    = row["val"].value()
+            if not metric:
+                continue
+            if cond == "error_if_zero":
+                result.append({"metric": metric, "error_if_zero": True})
+            else:
+                result.append({"metric": metric, cond: val})
+        return result
+
+    # ── UI ────────────────────────────────────────────────────────────────── #
+
+    def _build_ui(self, device_label: str):
+        vbox = QVBoxLayout(self)
+        vbox.setSpacing(8)
+        vbox.setContentsMargins(12, 12, 12, 12)
+
+        title = QLabel(f"Health rules for:  {device_label}")
+        f = title.font(); f.setBold(True); f.setPointSize(10)
+        title.setFont(f)
+        title.setStyleSheet("color: black; font-size: 10pt;")
+        vbox.addWidget(title)
+
+        help_lbl = QLabel(
+            "Each rule evaluates a metric and sets health to warning or error "
+            "when the condition is met.  The worst matching rule wins."
+        )
+        help_lbl.setWordWrap(True)
+        help_lbl.setStyleSheet("color: #555; font-size: 8pt;")
+        vbox.addWidget(help_lbl)
+
+        # Column headers
+        hdr = QWidget()
+        hl  = QHBoxLayout(hdr)
+        hl.setContentsMargins(4, 0, 32, 0)
+        for text, stretch in [("Metric", 3), ("Condition", 3), ("Value", 2)]:
+            lbl = QLabel(text)
+            lbl.setStyleSheet("color: #555; font-weight: bold; font-size: 8pt;")
+            hl.addWidget(lbl, stretch)
+        vbox.addWidget(hdr)
+
+        # Scrollable rule list
+        self._rules_container = QWidget()
+        self._rules_vbox = QVBoxLayout(self._rules_container)
+        self._rules_vbox.setContentsMargins(0, 0, 0, 0)
+        self._rules_vbox.setSpacing(3)
+
+        scroll = QScrollArea()
+        scroll.setWidget(self._rules_container)
+        scroll.setWidgetResizable(True)
+        scroll.setFixedHeight(220)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        vbox.addWidget(scroll)
+
+        for rule in self._initial_rules:
+            self._add_row(rule)
+
+        add_btn = QPushButton("+ Add Rule")
+        add_btn.clicked.connect(lambda: self._add_row())
+        vbox.addWidget(add_btn)
+
+        vbox.addWidget(_sep())
+
+        btns = QHBoxLayout()
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(self._save)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btns.addWidget(save_btn)
+        btns.addWidget(cancel_btn)
+        vbox.addLayout(btns)
+
+    def _add_row(self, rule: dict = None):
+        row_w = QWidget()
+        row_l = QHBoxLayout(row_w)
+        row_l.setContentsMargins(0, 0, 0, 0)
+        row_l.setSpacing(4)
+
+        metric_cb = QComboBox()
+        for m in self._metrics:
+            metric_cb.addItem(m)
+
+        cond_cb = QComboBox()
+        for key, label in _CONDITIONS:
+            cond_cb.addItem(label, key)
+
+        val_spin = QDoubleSpinBox()
+        val_spin.setRange(-999999, 999999)
+        val_spin.setDecimals(1)
+
+        del_btn = QPushButton("×")
+        del_btn.setFixedWidth(28)
+        del_btn.setStyleSheet(
+            "QPushButton { color: #c00; font-weight: bold; padding: 2px; }"
+            "QPushButton:hover { background: #fdd; }"
+        )
+
+        if rule:
+            ci = metric_cb.findText(rule["metric"])
+            if ci >= 0:
+                metric_cb.setCurrentIndex(ci)
+            ci = cond_cb.findData(rule["cond"])
+            if ci >= 0:
+                cond_cb.setCurrentIndex(ci)
+            val_spin.setValue(rule.get("value", 0.0))
+
+        def _sync_val():
+            val_spin.setEnabled(cond_cb.currentData() != "error_if_zero")
+        cond_cb.currentIndexChanged.connect(_sync_val)
+        _sync_val()
+
+        row_l.addWidget(metric_cb, 3)
+        row_l.addWidget(cond_cb,   3)
+        row_l.addWidget(val_spin,  2)
+        row_l.addWidget(del_btn,   0)
+
+        row_data = {"w": row_w, "metric": metric_cb,
+                    "cond": cond_cb, "val": val_spin}
+        self._rule_rows.append(row_data)
+        self._rules_vbox.addWidget(row_w)
+
+        del_btn.clicked.connect(lambda: self._delete_row(row_data))
+
+    def _delete_row(self, row_data: dict):
+        row_data["w"].deleteLater()
+        self._rule_rows.remove(row_data)
+
+    def _save(self):
+        new_rules = self._collect_rules()
+
+        # Write hosts.json
+        try:
+            with open(self._hosts_path) as f:
+                configs = json.load(f)
+            for cfg in configs:
+                if cfg.get("key") == self._device_key:
+                    cfg.setdefault("collector", {})["health_rules"] = new_rules
+                    break
+            with open(self._hosts_path, "w") as f:
+                json.dump(configs, f, indent=2)
+        except Exception as exc:
+            QMessageBox.warning(self, "Save Error", str(exc))
+            return
+
+        # Hot-update in-memory collector config (takes effect on next poll)
+        for h in host_registry._active:
+            if h.key == self._device_key:
+                h._config.setdefault("collector", {})["health_rules"] = new_rules
+                break
+
+        self.accept()
+
+
+# ============================================================
+#  _SlateManagerDialog
+# ============================================================
+
+class _SlateManagerDialog(QDialog):
+    """Create, rename, duplicate, and delete slates."""
+
+    def __init__(self, mgr: SlateManager, parent=None):
+        super().__init__(parent)
+        self._mgr = mgr
+        self.setWindowTitle("Manage Slates")
+        self.setMinimumWidth(420)
+        self.setMinimumHeight(300)
+        self.setStyleSheet(_plain_dialog_style())
+        self._build_ui()
+        self._refresh()
+
+    def _build_ui(self):
+        vbox = QVBoxLayout(self)
+        vbox.setSpacing(8)
+        vbox.setContentsMargins(12, 12, 12, 12)
+
+        title = QLabel("SLATES")
+        f = title.font(); f.setBold(True); f.setPointSize(10)
+        title.setFont(f)
+        title.setStyleSheet("color: black; font-size: 10pt;")
+        vbox.addWidget(title)
+
+        self._list = QListWidget()
+        self._list.setStyleSheet(
+            "QListWidget { background: white; color: black; border: 1px solid #aaa; }"
+            "QListWidget::item:selected { background: #0078d7; color: white; }"
+        )
+        vbox.addWidget(self._list)
+
+        # Description row
+        desc_row = QHBoxLayout()
+        desc_row.addWidget(QLabel("Description:"))
+        self._desc_edit = QLineEdit()
+        self._desc_edit.setPlaceholderText("optional note for this slate")
+        self._desc_edit.editingFinished.connect(self._save_description)
+        desc_row.addWidget(self._desc_edit)
+        vbox.addLayout(desc_row)
+
+        # Action buttons
+        btn_row = QHBoxLayout()
+        for label, slot in [("New",       self._new),
+                             ("Duplicate", self._duplicate),
+                             ("Rename",    self._rename),
+                             ("Delete",    self._delete)]:
+            btn = QPushButton(label)
+            btn.clicked.connect(slot)
+            btn_row.addWidget(btn)
+        vbox.addLayout(btn_row)
+
+        vbox.addWidget(_sep())
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        vbox.addWidget(close_btn)
+
+        self._list.currentItemChanged.connect(self._on_item_changed)
+
+    def _refresh(self, select_name: str = None):
+        self._list.blockSignals(True)
+        self._list.clear()
+        active = self._mgr.active_slate
+        for s in self._mgr._slates:
+            marker = "●  " if (active and s.name == active.name) else "    "
+            item = QListWidgetItem(f"{marker}{s.name}")
+            item.setData(Qt.UserRole, s.name)
+            self._list.addItem(item)
+        target = select_name or (active.name if active else None)
+        if target:
+            for i in range(self._list.count()):
+                if self._list.item(i).data(Qt.UserRole) == target:
+                    self._list.setCurrentRow(i)
+                    break
+        self._list.blockSignals(False)
+        self._on_item_changed()
+
+    def _selected_name(self) -> Optional[str]:
+        item = self._list.currentItem()
+        return item.data(Qt.UserRole) if item else None
+
+    def _on_item_changed(self):
+        name = self._selected_name()
+        if name:
+            s = self._mgr.get(name)
+            self._desc_edit.blockSignals(True)
+            self._desc_edit.setText(s.description if s else "")
+            self._desc_edit.blockSignals(False)
+
+    def _save_description(self):
+        name = self._selected_name()
+        if name:
+            self._mgr.update_description(name, self._desc_edit.text().strip())
+
+    def _new(self):
+        name, ok = _simple_input(self, "New Slate", "Slate name:")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if name in self._mgr.names:
+            QMessageBox.warning(self, "Name Taken", f'A slate named "{name}" already exists.')
+            return
+        self._mgr.new_slate(name)
+        self._refresh(name)
+
+    def _duplicate(self):
+        src_name = self._selected_name()
+        if not src_name:
+            return
+        name, ok = _simple_input(self, "Duplicate Slate",
+                                  "Name for the copy:", default=f"{src_name} copy")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if name in self._mgr.names:
+            QMessageBox.warning(self, "Name Taken", f'A slate named "{name}" already exists.')
+            return
+        self._mgr.new_slate(name, copy_from=self._mgr.get(src_name))
+        self._refresh(name)
+
+    def _rename(self):
+        old = self._selected_name()
+        if not old:
+            return
+        new, ok = _simple_input(self, "Rename Slate", "New name:", default=old)
+        if not ok or not new.strip() or new.strip() == old:
+            return
+        new = new.strip()
+        if new in self._mgr.names:
+            QMessageBox.warning(self, "Name Taken", f'A slate named "{new}" already exists.')
+            return
+        self._mgr.rename_slate(old, new)
+        self._refresh(new)
+
+    def _delete(self):
+        name = self._selected_name()
+        if not name:
+            return
+        if len(self._mgr._slates) <= 1:
+            QMessageBox.information(self, "Cannot Delete", "You must have at least one slate.")
+            return
+        ans = QMessageBox.question(
+            self, "Delete Slate",
+            f'Delete "{name}"?  Layout files are kept on disk.',
+            QMessageBox.Yes | QMessageBox.Cancel,
+        )
+        if ans == QMessageBox.Yes:
+            self._mgr.delete_slate(name)
+            self._refresh()
+
+
+# ============================================================
 #  DesignerWindow
 # ============================================================
 
 class DesignerWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, kiosk: bool = False, initial_slate: str = None):
         super().__init__()
-        self.setWindowTitle("Instrument Panel")
+        self.setWindowTitle("Control Room")
         self.setStyleSheet("QMainWindow { background-color: #3C4323; }"
                            "QToolBar    { background-color: #2a2e1a; border: none; spacing: 6px; }"
                            "QToolButton { color: #c8bfa8; padding: 4px 10px; }")
 
+        # ── Slate manager (must be first — path helpers depend on it) ─────────
+        global _slate_mgr
+        _slate_mgr = SlateManager(os.path.dirname(os.path.abspath(__file__)))
+        if initial_slate and initial_slate in _slate_mgr.names:
+            _slate_mgr.set_active(initial_slate)
+
+        # ── Instrument Panel ─────────────────────────────────────────────────
         model         = _load_or_default()
         theme_info    = THEME_REGISTRY.get(model.theme_key, THEME_REGISTRY["wwii"])
         self._canvas  = LayoutCanvas(model, theme_info["factory"](),
@@ -1345,19 +1788,62 @@ class DesignerWindow(QMainWindow):
         self._sidebar = EditSidebar(self._canvas)
         self._sidebar.sync_theme_combo(model.theme_key)
         self._sidebar.hide()
-        self._edit_mode = False
 
         self._container = _PanelContainer()
         self._container.setup(self._canvas, self._sidebar)
-        self.setCentralWidget(self._container)
 
+        # ── Ops Board ────────────────────────────────────────────────────────
+        ops_model         = _load_or_default_ops()
+        self._ops_canvas  = OpsBoardCanvas(ops_model, theme_info)
+        self._ops_sidebar = OpsBoardSidebar(self._ops_canvas,
+                                            path_fn=_ops_board_path)
+        self._ops_sidebar.sync_bg_label()
+        self._ops_sidebar.hide()
+
+        self._ops_container = _PanelContainer()
+        self._ops_container.setup(self._ops_canvas, self._ops_sidebar)
+
+        # ── Stacked layout ───────────────────────────────────────────────────
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._container)       # index 0 — instrument panel
+        self._stack.addWidget(self._ops_container)   # index 1 — ops board
+        self.setCentralWidget(self._stack)
+
+        self._edit_mode        = False
+        self._current_view     = "panel"
+        self._pre_detail_model = None
+
+        self._ops_canvas.entity_clicked.connect(self._on_ops_entity_clicked)
+
+        # ── Toolbar ──────────────────────────────────────────────────────────
         tb = self.addToolBar("Main")
         tb.setMovable(False)
+
         self._edit_action = tb.addAction("✏  Edit Layout  [E]")
         self._edit_action.setCheckable(True)
         self._edit_action.triggered.connect(self.toggle_edit_mode)
 
+        tb.addSeparator()
+        tb.addAction("Instrument Panel").triggered.connect(
+            lambda: self._switch_view("panel"))
+        tb.addAction("Ops Board").triggered.connect(
+            lambda: self._switch_view("ops"))
+
+        tb.addSeparator()
+        tb.addWidget(QLabel("  Slate: "))
+
+        self._slate_combo = QComboBox()
+        self._slate_combo.setMinimumWidth(140)
+        self._slate_combo.activated.connect(
+            lambda _: self._switch_slate(self._slate_combo.currentText()))
+        tb.addWidget(self._slate_combo)
+
+        self._manage_action = tb.addAction("⚙")
+        self._manage_action.setToolTip("Manage slates")
+        self._manage_action.triggered.connect(self._manage_slates)
+
         self.resize(960, 660)
+        self._update_slate_combo()
         self.update_bg(theme_info)
 
         QShortcut(QKeySequence("E"), self).activated.connect(self.toggle_edit_mode)
@@ -1365,29 +1851,158 @@ class DesignerWindow(QMainWindow):
             lambda: self.set_edit_mode(False)
         )
 
+        # ── Kiosk mode ───────────────────────────────────────────────────────
+        if kiosk:
+            self._edit_action.setVisible(False)
+            self._manage_action.setVisible(False)
+            self.showFullScreen()
+
     def update_bg(self, theme_info: dict):
         bg  = theme_info["bg"]
         tbg = theme_info["toolbar_bg"]
         tfg = theme_info["toolbar_fg"]
         self._canvas.setStyleSheet(f"background-color: {bg};")
         self._container.setStyleSheet(f"background-color: {bg};")
+        self._ops_container.setStyleSheet(f"background-color: {bg};")
         self.setStyleSheet(
             f"QMainWindow  {{ background-color: {bg}; }}"
             f"QToolBar     {{ background-color: {tbg}; border: none; spacing: 6px; }}"
             f"QToolButton  {{ color: {tfg}; padding: 4px 10px; }}"
         )
         self._sidebar.setStyleSheet(theme_info["sidebar"])
+        self._ops_canvas.set_theme(theme_info)
+        self._ops_sidebar.set_style(theme_info["sidebar"])
+        combo_style = (
+            f"QComboBox {{ background: {tbg}; color: {tfg}; "
+            f"border: 1px solid {theme_info.get('div_bg', tbg)}; "
+            f"padding: 2px 6px; }}"
+            f"QComboBox QAbstractItemView {{ background: {tbg}; color: {tfg}; }}"
+        )
+        self._slate_combo.setStyleSheet(combo_style)
 
     def toggle_edit_mode(self):
         self.set_edit_mode(not self._edit_mode)
 
     def set_edit_mode(self, enabled: bool):
         self._edit_mode = enabled
-        self._canvas.set_edit_mode(enabled)
-        self._sidebar.setVisible(enabled)
         self._edit_action.setChecked(enabled)
-        if not enabled:
-            self._canvas._model.save(_layout_path())
+        if self._current_view == "panel":
+            self._canvas.set_edit_mode(enabled)
+            self._sidebar.setVisible(enabled)
+            if not enabled:
+                self._canvas._model.save(_layout_path())
+        else:
+            self._ops_canvas.set_edit_mode(enabled)
+            self._ops_sidebar.setVisible(enabled)
+            if not enabled:
+                self._ops_canvas.save(_ops_board_path())
+
+    def _switch_view(self, view: str):
+        if self._edit_mode:
+            self.set_edit_mode(False)
+        # Leaving device-detail mode → restore main layout
+        if self._pre_detail_model is not None:
+            self._canvas.load_model(self._pre_detail_model)
+            self._pre_detail_model = None
+            self.setWindowTitle("Control Room")
+        self._current_view = view
+        self._stack.setCurrentIndex(0 if view == "panel" else 1)
+
+    def _on_ops_entity_clicked(self, idx: int):
+        entity = self._ops_canvas._model.entities[idx]
+        menu   = QMenu(self)
+        detail_act = menu.addAction("Detailed View")
+        defn_act   = menu.addAction("Definition…")
+        if not entity.key:
+            detail_act.setEnabled(False)
+            defn_act.setEnabled(False)
+        chosen = menu.exec(QCursor.pos())
+        if chosen == detail_act:
+            self._open_detailed_view(entity.key)
+        elif chosen == defn_act:
+            self._open_definition(entity.key)
+
+    def _open_definition(self, device_key: str):
+        dlg = _DefinitionDialog(
+            device_key      = device_key,
+            hosts_path      = _hosts_path(),
+            source_registry = SOURCE_REGISTRY,
+            parent          = self,
+        )
+        dlg.exec()
+
+    def _open_detailed_view(self, device_key: str):
+        layout_file = _device_layout_path(device_key)
+        if os.path.exists(layout_file):
+            try:
+                model = LayoutModel.load(layout_file)
+            except Exception:
+                model = _auto_layout_for_device(
+                    device_key, SOURCE_REGISTRY,
+                    self._canvas._model.theme_key)
+        else:
+            model = _auto_layout_for_device(
+                device_key, SOURCE_REGISTRY,
+                self._canvas._model.theme_key)
+            model.save(layout_file)
+
+        # Stash main layout so we can restore it on exit
+        self._pre_detail_model = self._canvas._model
+        self._switch_view("panel")
+        self._canvas.load_model(model)
+        theme_info = THEME_REGISTRY.get(model.theme_key, THEME_REGISTRY["wwii"])
+        self._canvas.set_theme(theme_info["factory"](), model.theme_key)
+        self._sidebar.sync_theme_combo(model.theme_key)
+        # Toolbar hint
+        self.setWindowTitle(f"Control Room — {device_key}")
+
+    # ── Slate helpers ─────────────────────────────────────────────────── #
+
+    def _update_slate_combo(self):
+        self._slate_combo.blockSignals(True)
+        self._slate_combo.clear()
+        active = _slate_mgr.active_slate
+        for name in _slate_mgr.names:
+            self._slate_combo.addItem(name)
+        if active:
+            ci = self._slate_combo.findText(active.name)
+            if ci >= 0:
+                self._slate_combo.setCurrentIndex(ci)
+        self._slate_combo.blockSignals(False)
+
+    def _save_current_slate(self):
+        self._canvas._model.save(_layout_path())
+        self._ops_canvas.save(_ops_board_path())
+
+    def _switch_slate(self, name: str):
+        if not _slate_mgr or name not in _slate_mgr.names:
+            return
+        if _slate_mgr.active_slate and name == _slate_mgr.active_slate.name:
+            return
+        self._save_current_slate()
+        _slate_mgr.set_active(name)
+        # Reload instrument panel
+        model = _load_or_default()
+        theme_info = THEME_REGISTRY.get(model.theme_key, THEME_REGISTRY["wwii"])
+        self._canvas.load_model(model)
+        self._canvas.set_theme(theme_info["factory"](), model.theme_key)
+        self._sidebar.sync_theme_combo(model.theme_key)
+        # Reload ops board
+        ops_model = _load_or_default_ops()
+        self._ops_canvas.load_model(ops_model)
+        self._ops_sidebar.sync_bg_label()
+        self.update_bg(theme_info)
+        self._update_slate_combo()
+        self._pre_detail_model = None
+
+    def _manage_slates(self):
+        dlg = _SlateManagerDialog(_slate_mgr, self)
+        dlg.exec()
+        self._update_slate_combo()
+
+    def closeEvent(self, event):
+        self._save_current_slate()
+        super().closeEvent(event)
 
 
 # ============================================================
@@ -1395,10 +2010,29 @@ class DesignerWindow(QMainWindow):
 # ============================================================
 
 def _layout_path() -> str:
+    if _slate_mgr:
+        return _slate_mgr.layout_path()
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "layout.json")
+
+
+def _ops_board_path() -> str:
+    if _slate_mgr:
+        return _slate_mgr.ops_board_path()
+    return ops_board_path()
+
 
 def _hosts_path() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "hosts.json")
+
+
+def _load_or_default_ops() -> OpsBoardLayout:
+    p = _ops_board_path()
+    if os.path.exists(p):
+        try:
+            return OpsBoardLayout.load(p)
+        except Exception:
+            pass
+    return OpsBoardLayout()
 
 
 def _load_or_default() -> LayoutModel:
@@ -1427,13 +2061,22 @@ def _load_or_default() -> LayoutModel:
 
 if __name__ == "__main__":
     import atexit
+    import argparse
+
     logging.basicConfig(level=logging.INFO,
                         format="%(levelname)s  %(name)s  %(message)s")
+
+    parser = argparse.ArgumentParser(description="Control Room")
+    parser.add_argument("--kiosk", action="store_true",
+                        help="Full-screen read-only mode")
+    parser.add_argument("--slate", metavar="NAME", default=None,
+                        help="Name of the slate to load on startup")
+    args = parser.parse_args()
 
     host_registry.load(_hosts_path(), SOURCE_REGISTRY)
     atexit.register(host_registry.stop_all)
 
     app = QApplication(sys.argv)
-    win = DesignerWindow()
+    win = DesignerWindow(kiosk=args.kiosk, initial_slate=args.slate)
     win.show()
     sys.exit(app.exec())
