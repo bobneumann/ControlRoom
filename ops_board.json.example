@@ -1,0 +1,18 @@
+{
+  "background": "C:/path/to/your/floorplan.png",
+  "theme_key": "wwii",
+  "entities": [
+    { "key": "qsys_core",        "label": "Q-SYS Core",      "icon": "controller", "x": 0.22, "y": 0.25 },
+    { "key": "shure_wireless",   "label": "Shure ULXD4Q",    "icon": "controller", "x": 0.62, "y": 0.22 },
+    { "key": "ptz_cam_1",        "label": "Cam — Pulpit",    "icon": "camera",     "x": 0.45, "y": 0.42 },
+    { "key": "ptz_cam_2",        "label": "Cam — Wide",      "icon": "camera",     "x": 0.20, "y": 0.58 },
+    { "key": "atem_switcher",    "label": "ATEM 4 M/E",      "icon": "controller", "x": 0.62, "y": 0.68 },
+    { "key": "propresenter_mac", "label": "ProPresenter",    "icon": "display",    "x": 0.67, "y": 0.74 },
+    { "key": "streaming_pc",     "label": "Streaming PC",    "icon": "server",     "x": 0.57, "y": 0.74 },
+    { "key": "dante_switch",     "label": "SW — Dante",      "icon": "switch",     "x": 0.83, "y": 0.72 },
+    { "key": "foh_switch",       "label": "SW — FOH",        "icon": "switch",     "x": 0.88, "y": 0.78 },
+    { "key": "lyntec_panel",     "label": "Lyntec Relay",    "icon": "controller", "x": 0.83, "y": 0.83 },
+    { "key": "ups_main",         "label": "APC UPS",         "icon": "generic",    "x": 0.88, "y": 0.88 },
+    { "key": "nvr",              "label": "Security NVR",    "icon": "server",     "x": 0.78, "y": 0.83 }
+  ]
+}

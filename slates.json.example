@@ -1,0 +1,29 @@
+{
+  "active": "Master",
+  "slates": [
+    {
+      "name": "Master",
+      "description": "Wall display — all systems",
+      "layout_file": "layout_master.json",
+      "ops_board_file": "ops_board_master.json"
+    },
+    {
+      "name": "Sound",
+      "description": "Audio crew — Q-SYS, Dante, wireless mics",
+      "layout_file": "layout_sound.json",
+      "ops_board_file": "ops_board_sound.json"
+    },
+    {
+      "name": "Lighting",
+      "description": "Lighting crew — relay panel, power",
+      "layout_file": "layout_lighting.json",
+      "ops_board_file": "ops_board_lighting.json"
+    },
+    {
+      "name": "Video",
+      "description": "Video crew — ATEM, cameras, streaming PC",
+      "layout_file": "layout_video.json",
+      "ops_board_file": "ops_board_video.json"
+    }
+  ]
+}

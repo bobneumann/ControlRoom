@@ -1,0 +1,40 @@
+{
+  "grid_cols": 3,
+  "grid_rows": 3,
+  "theme_key": "wwii",
+  "slots": [
+    {
+      "slot_type": "divider",
+      "label": "Streaming PC",
+      "source_key": "streaming_pc",
+      "row": 0, "col": 0, "row_span": 1, "col_span": 3
+    },
+    {
+      "slot_type": "gauge",
+      "source_key": "streaming_pc:cpu",
+      "label": "CPU", "unit": "%",
+      "min_val": 0, "max_val": 100, "danger_from": 80,
+      "row": 1, "col": 0, "row_span": 1, "col_span": 1
+    },
+    {
+      "slot_type": "gauge",
+      "source_key": "streaming_pc:ram",
+      "label": "RAM", "unit": "%",
+      "min_val": 0, "max_val": 100, "danger_from": 85,
+      "row": 1, "col": 1, "row_span": 1, "col_span": 1
+    },
+    {
+      "slot_type": "gauge",
+      "source_key": "streaming_pc:disk",
+      "label": "Disk", "unit": "%",
+      "min_val": 0, "max_val": 100, "danger_from": 90,
+      "row": 1, "col": 2, "row_span": 1, "col_span": 1
+    },
+    {
+      "slot_type": "divider",
+      "label": "UPS",
+      "source_key": "ups_main",
+      "row": 2, "col": 0, "row_span": 1, "col_span": 3
+    }
+  ]
+}

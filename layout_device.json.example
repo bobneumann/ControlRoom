@@ -1,0 +1,29 @@
+{
+  "_comment": "Auto-generated when you open Detailed View for a device. Filename is layout_{device_key}.json.",
+  "grid_cols": 3,
+  "grid_rows": 2,
+  "theme_key": "wwii",
+  "slots": [
+    {
+      "slot_type": "gauge",
+      "source_key": "ups_main:battery_pct",
+      "label": "Battery", "unit": "%",
+      "min_val": 0, "max_val": 100, "danger_from": 25,
+      "row": 0, "col": 0, "row_span": 1, "col_span": 1
+    },
+    {
+      "slot_type": "gauge",
+      "source_key": "ups_main:load_pct",
+      "label": "Load", "unit": "%",
+      "min_val": 0, "max_val": 100, "danger_from": 70,
+      "row": 0, "col": 1, "row_span": 1, "col_span": 1
+    },
+    {
+      "slot_type": "gauge",
+      "source_key": "ups_main:runtime_min",
+      "label": "Runtime", "unit": "min",
+      "min_val": 0, "max_val": 60, "danger_from": 10,
+      "row": 0, "col": 2, "row_span": 1, "col_span": 1
+    }
+  ]
+}
