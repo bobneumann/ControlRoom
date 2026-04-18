@@ -5,6 +5,7 @@ services:
       - "8765:8765"
     volumes:
       - ./hosts.json:/app/hosts.json:ro
-      - ./controlroom.db:/app/controlroom.db
+      - ./data:/app/data
       - C:/Users/Bob/.ssh/panel.key:/run/keys/panel.key:ro
+    command: ["python", "daemon.py", "--db", "/app/data/controlroom.db"]
     restart: unless-stopped
