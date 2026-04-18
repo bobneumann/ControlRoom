@@ -1,0 +1,15 @@
+hosts.json
+layout*.json
+ops_board*.json
+slates.json
+controlroom.db
+*.key
+*.pem
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.venv/
+venv/
+dist/
+build/

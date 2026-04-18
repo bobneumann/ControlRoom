@@ -21,6 +21,7 @@ config.collector fields:
 """
 
 import subprocess
+import sys
 import logging
 
 log = logging.getLogger(__name__)
@@ -33,6 +34,9 @@ def poll(config: dict, state: dict) -> tuple[dict, dict]:
     community = c.get("community", "public")
     oids      = c.get("oids", {})
     snmpget   = c.get("snmpget_path", "snmpget")
+    # "wsl snmpget" only works on native Windows; inside Docker/Linux use snmpget directly
+    if snmpget == "wsl snmpget" and sys.platform != "win32":
+        snmpget = "snmpget"
 
     if not oids:
         return {"health": "unknown", "message": "No OIDs configured", "metrics": {}}, state
